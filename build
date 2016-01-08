@@ -25,4 +25,5 @@ CFLAGS="-Wall -Weverything -Wno-gnu-empty-initializer -Wno-zero-length-array -Wn
 
 CFLAGS="-std=gnu11 -x c $CFLAGS"
 
+sed -f gen_unicode_table.sed < XID_Start.txt > src/xid_start_table.gen.h
 $CC -static $CFLAGS -o mepa src/main.c
