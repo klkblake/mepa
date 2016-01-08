@@ -11,11 +11,9 @@ typedef struct {
 } Location;
 
 typedef enum {
-	TOK_IDENTIFIER,
+	TOK_WORD,
 	TOK_OPERATOR,
 	TOK_BRACKET,
-	TOK_INTEGER,
-	TOK_FLOAT,
 	TOK_STRING,
 	TOK_UNKNOWN,
 	TOK_EOF,
@@ -24,19 +22,11 @@ typedef enum {
 typedef struct {
 	TokenType type;
 	Location location;
-	s32 indent_level;
 	u8 *start;
 	u32 len;
-	union {
-		struct {
-			u64 number_int;
-			b1 negative;
-			u8 radix;
-			u8 num_digits;
-		};
-		f64 number_float;
-		char *str;
-	};
+	s32 indent_level;
+	b1 has_alignment;
+	char *str;
 } Token;
 
 typedef struct {
@@ -70,6 +60,7 @@ s32 next_char(LexerState *state) {
 	}
 	s32 c = state->file[state->index++];
 	if ((c & 0x80) != 0) {
+		// TODO check for underflow?
 		state->location.column--;
 	}
 	state->last_not_newline = c != '\n';
@@ -78,20 +69,13 @@ s32 next_char(LexerState *state) {
 
 // TODO UTF-8.
 internal
-b32 is_digit(s32 c) {
-	return '0' <= c && c <= '9';
-}
-
-internal
-b32 is_ident_start(s32 c) {
+b32 is_word(s32 c) {
+	// TODO when we have unicode, include subscript 10.
 	return ('a' <= c && c <= 'z' ||
 	        'A' <= c && c <= 'Z' ||
-	        c == '_');
-}
-
-internal
-b32 is_ident(s32 c) {
-	return is_ident_start(c) || is_digit(c);
+	        '0' <= c && c <= '9' ||
+	        c == '_' ||
+	        c == '#');
 }
 
 internal
@@ -131,7 +115,6 @@ internal
 void next_token(LexerState *state, Token *token) {
 	s32 c;
 	// TODO comments!
-	// TODO alignment (we don't care about the value, but it must exist). A stack? Or just check it exists...
 	do {
 		c = next_char(state);
 		if (state->in_indent) {
@@ -140,6 +123,8 @@ void next_token(LexerState *state, Token *token) {
 				token->indent_level++;
 				c = next_char(state);
 			}
+			token->has_alignment = c == ' ';
+			state->in_indent = false;
 		} else {
 			token->indent_level = -1;
 		}
@@ -150,6 +135,7 @@ void next_token(LexerState *state, Token *token) {
 		}
 		while (c == ' ') {
 			c = next_char(state);
+			// TODO eat comments here?
 		}
 	} while (c == '\n');
 	token->location = state->location;
@@ -162,34 +148,14 @@ void next_token(LexerState *state, Token *token) {
 		token->len++; \
 		c = peek(state); \
 	}
-	if (is_ident_start(c)) {
-		token->type = TOK_IDENTIFIER;
-		ADD_WHILE(is_ident(c));
+	if (is_word(c)) {
+		token->type = TOK_WORD;
+		ADD_WHILE(is_word(c));
 	} else if (is_operator(c)) {
 		token->type = TOK_OPERATOR;
 		ADD_WHILE(is_operator(c));
 	} else if (is_bracket(c)) {
 		token->type = TOK_BRACKET;
-	} else if (is_digit(c)) {
-		token->type = TOK_INTEGER;
-		ADD_WHILE(is_digit(c));
-		// TODO actually parse float
-		if (c == 'b' || c == 'o' || c == 'd' || c == 'x' || c == 'r') {
-			next_char(state);
-			// TODO handle radix
-			ADD_WHILE(is_digit(c));
-		}
-		if (c == '.') {
-			token->type = TOK_FLOAT;
-			// TODO allow radix for float?
-			next_char(state);
-			ADD_WHILE(is_digit(c));
-		}
-		if (c == 'e') {
-			token->type = TOK_FLOAT;
-			next_char(state);
-			ADD_WHILE(is_digit(c));
-		}
 	} else if (c == '"') {
 		// TODO handle escapes, figure out multiline strategy
 		token->type = TOK_STRING;
@@ -269,13 +235,13 @@ int format_main(int argc, char **argv) {
 	Token token = { .type = TOK_UNKNOWN };
 	while (token.type != TOK_EOF) {
 		next_token(&state, &token);
-		printf("%s:%u:%u: (indent %d) ", token.location.file, token.location.line, token.location.column, token.indent_level);
+		printf("%s:%u:%u: (indent %d, has_align: %s) ",
+		       token.location.file, token.location.line, token.location.column,
+		       token.indent_level, token.has_alignment ? "true" : "false");
 		switch (token.type) {
-		case TOK_IDENTIFIER: printf("IDENTIFIER \"%.*s\"", token.len, token.start); break;
+		case TOK_WORD: printf("WORD \"%.*s\"", token.len, token.start); break;
 		case TOK_OPERATOR: printf("OPERATOR \"%.*s\"", token.len, token.start); break;
 		case TOK_BRACKET: printf("BRACKET '%c'", *token.start); break;
-		case TOK_INTEGER: printf("INTEGER \"%.*s\"", token.len, token.start); break;
-		case TOK_FLOAT: printf("FLOAT \"%.*s\"", token.len, token.start); break;
 		case TOK_STRING: printf("STRING \"%.*s\"", token.len, token.start); break;
 		case TOK_UNKNOWN: printf("UNKNOWN \"%.*s\"", token.len, token.start); break;
 		case TOK_EOF: printf("EOF"); break;
