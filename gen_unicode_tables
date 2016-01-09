@@ -1,0 +1,24 @@
+#!/bin/bash
+
+munge() {
+	sed 's/^\([0-9A-F]\+\) .*$/\t{0x\1, 0x\1},/;s/^\([0-9A-F]\+\)..\([0-9A-F]\+\) .*$/\t{0x\1, 0x\2},/'
+}
+
+gen_table() {
+	cat > src/${2}_table.gen.h <<EOF
+internal
+UnicodeRange16 ${2}_table_16[] = {
+EOF
+	egrep '^[0-9A-F]{4}(\.\.[0-9A-F]{4})? ' < $1 | munge >> src/${2}_table.gen.h
+	cat >> src/${2}_table.gen.h <<EOF
+};
+
+internal
+UnicodeRange32 ${2}_table_32[] = {
+EOF
+	egrep '^([0-9A-F]{4,5}\.\.)?[0-9A-F]{5} ' < $1 | munge >> src/${2}_table.gen.h
+	echo '};' >> src/${2}_table.gen.h
+}
+
+gen_table XID_Start.txt xid_start
+gen_table XID_Continue.txt xid_continue

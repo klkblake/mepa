@@ -1,6 +1,4 @@
-#include "common.h"
-
-#include "xid_start_table.gen.h"
+#include "unicode.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,7 +11,8 @@ typedef struct {
 } Location;
 
 typedef enum {
-	TOK_LETTERS,
+	TOK_START_LETTERS,
+	TOK_CONTINUE_LETTERS,
 	TOK_DIGITS,
 	TOK_SYMBOL,
 	TOK_BRACKET,
@@ -160,11 +159,7 @@ retry:;
 }
 
 internal
-b32 is_letter(s32 ch) {
-	if (ch == -1) {
-		return false;
-	}
-	u32 c = (u32)ch;
+b32 in_unicode_range(u32 c, UnicodeRange16 *table16, u32 size16, UnicodeRange32 *table32, u32 size32) {
 	// TODO uncomment after testing binary search
 	/*
 	if (c <= 0xff) {
@@ -180,18 +175,52 @@ b32 is_letter(s32 ch) {
 		return false;
 	}
 	*/
+	if (c <= 0xffff) {
+		u32 lo = 0;
+		u32 hi = size16 - 1;
+		while (lo < hi) {
+			u32 mid = (lo + hi) / 2;
+			if (table16[mid].end < c) {
+				lo = mid + 1;
+			} else {
+				hi = mid;
+			}
+		}
+		UnicodeRange16 range = table16[lo];
+		return range.start <= c && c <= range.end;
+	}
 	u32 lo = 0;
-	u32 hi = array_count(xid_start_table) - 1;
+	u32 hi = size32 - 1;
 	while (lo < hi) {
 		u32 mid = (lo + hi) / 2;
-		if (xid_start_table[mid].end < c) {
+		if (table32[mid].end < c) {
 			lo = mid + 1;
 		} else {
 			hi = mid;
 		}
 	}
-	UnicodeRange range = xid_start_table[lo];
+	UnicodeRange32 range = table32[lo];
 	return range.start <= c && c <= range.end;
+}
+
+internal
+b32 is_start_letter(s32 c) {
+	if (c == -1) {
+		return false;
+	}
+	return in_unicode_range((u32)c,
+	                        xid_start_table_16, array_count(xid_start_table_16),
+	                        xid_start_table_32, array_count(xid_start_table_32));
+}
+
+internal
+b32 is_continue_letter(s32 c) {
+	if (c == -1) {
+		return false;
+	}
+	return in_unicode_range((u32)c,
+	                        xid_continue_table_16, array_count(xid_continue_table_16),
+	                        xid_continue_table_32, array_count(xid_continue_table_32));
 }
 
 internal
@@ -283,7 +312,6 @@ void next_token(LexerState *state, Token *token) {
 				}
 				next_char(state);
 				token->len++;
-				// TODO handle EOF
 				if (c == '/') {
 					next = peek(state);
 					if (next == '*') {
@@ -316,9 +344,14 @@ void next_token(LexerState *state, Token *token) {
 		token->type = TOK_BRACKET;
 		return;
 	}
-	if (is_letter(c)) {
-		token->type = TOK_LETTERS;
-		ADD_WHILE(is_letter(c));
+	if (is_start_letter(c)) {
+		token->type = TOK_START_LETTERS;
+		ADD_WHILE(is_start_letter(c));
+		return;
+	}
+	if (is_continue_letter(c)) {
+		token->type = TOK_CONTINUE_LETTERS;
+		ADD_WHILE(!is_start_letter(c) && is_continue_letter(c));
 		return;
 	}
 	if (c == '"') {
@@ -423,8 +456,12 @@ int format_main(int argc, char **argv) {
 		cap += cap >> 1;
 		contents = realloc(contents, cap);
 	}
+	// TODO handle empty file
 	contents = realloc(contents, size);
 	fclose(file);
+	if (contents[size - 1] != '\n') {
+		lines++;
+	}
 	LexerState state = {};
 	state.file = contents;
 	state.len = size;
@@ -435,7 +472,8 @@ int format_main(int argc, char **argv) {
 		next_token(&state, &token);
 		printf("%s:%u:%u: ", token.location.file, token.location.line, token.location.column);
 		switch (token.type) {
-		case TOK_LETTERS: printf("LETTERS \"%.*s\"", token.len, token.start); break;
+		case TOK_START_LETTERS: printf("START_LETTERS \"%.*s\"", token.len, token.start); break;
+		case TOK_CONTINUE_LETTERS: printf("CONTINUE_LETTERS \"%.*s\"", token.len, token.start); break;
 		case TOK_DIGITS: printf("DIGITS \"%.*s\"", token.len, token.start); break;
 		case TOK_SYMBOL: printf("SYMBOL '%.*s'", token.len, token.start); break;
 		case TOK_BRACKET: printf("BRACKET '%.*s'", token.len, token.start); break;
