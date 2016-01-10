@@ -81,7 +81,7 @@ void report_error_single_line(LexerState *state, LexerErrorType type, Location l
 	}
 	if (state->error_count == state->error_cap) {
 		state->error_cap += state->error_cap >> 1;
-		state->errors = realloc(state->errors, state->error_cap);
+		state->errors = realloc(state->errors, state->error_cap * sizeof(LexerError));
 	}
 	LexerError *error = &state->errors[state->error_count++];
 	error->type = type;
@@ -108,11 +108,12 @@ s32 next_char(LexerState *state) {
 		state->lines[state->location.line - 1] = state->file + state->index;
 		state->in_indent = true;
 	}
+retry:;
 	if (state->index == state->len) {
 		return -1;
 	}
-retry:;
 	s32 c = state->file[state->index++];
+	state->last_not_newline = c != '\n';
 	if (c == 0xff) {
 		report_error_single_line(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
 		                         state->location, state->location.column);
@@ -154,7 +155,6 @@ retry:;
 			                         state->location, state->location.column);
 		}
 	}
-	state->last_not_newline = c != '\n';
 	return c;
 }
 
