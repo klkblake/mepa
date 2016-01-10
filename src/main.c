@@ -18,7 +18,7 @@ typedef enum {
 	TOK_BRACKET,
 	TOK_STRING,
 	TOK_NEWLINE,
-	TOK_WHITESPACE,
+	TOK_SPACES,
 	TOK_COMMENT,
 	TOK_UNKNOWN,
 	TOK_EOF,
@@ -288,7 +288,7 @@ void next_token(LexerState *state, Token *token) {
 	}
 	token->location = state->location;
 	if (c == ' ') {
-		token->type = TOK_WHITESPACE;
+		token->type = TOK_SPACES;
 		ADD_WHILE(c == ' ');
 		return;
 	}
@@ -481,7 +481,7 @@ int format_main(int argc, char **argv) {
 		case TOK_BRACKET: printf("BRACKET '%.*s'", token.len, token.start); break;
 		case TOK_STRING: printf("STRING \"%.*s\"", token.len, token.start); break;
 		case TOK_NEWLINE: printf("NEWLINE indent=%u", token.len - 1); break;
-		case TOK_WHITESPACE: printf("WHITESPACE \"%.*s\"", token.len, token.start); break;
+		case TOK_SPACES: printf("SPACES \"%.*s\"", token.len, token.start); break;
 		case TOK_COMMENT: printf("COMMENT \"%.*s\"", token.len, token.start); break;
 		case TOK_UNKNOWN: printf("UNKNOWN \"%.*s\"", token.len, token.start); break;
 		case TOK_EOF: printf("EOF"); break;
