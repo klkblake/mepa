@@ -456,7 +456,9 @@ int format_main(int argc, char **argv) {
 		cap += cap >> 1;
 		contents = realloc(contents, cap);
 	}
-	// TODO handle empty file
+	if (size == 0) {
+		return 0;
+	}
 	contents = realloc(contents, size);
 	fclose(file);
 	if (contents[size - 1] != '\n') {
