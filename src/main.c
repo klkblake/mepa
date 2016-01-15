@@ -89,9 +89,9 @@ s32 peek(LexerState *state) {
 	if (seq_len > 0) {
 		u32 index = state->index + 1;
 		c &= 0xff >> seq_len;
-		c <<= (seq_len - 1) * 6;
 		for (u32 i = 0; i < seq_len - 1; i++) {
-			c |= (state->file[index++] & 0x7f) << (seq_len - i - 2) * 6;
+			c <<= 6;
+			c |= state->file[index++] & 0x7f;
 		}
 	}
 	return c;
