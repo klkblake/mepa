@@ -33,6 +33,7 @@ typedef struct {
 } Token;
 
 typedef enum {
+	LEX_ERROR_UTF8_BOM_NOT_ALLOWED,
 	LEX_ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR,
 	LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
 	LEX_ERROR_UTF8_EOF_IN_SEQUENCE,
@@ -44,6 +45,7 @@ typedef enum {
 } LexerErrorType;
 
 internal char *lexer_error_messages[] = {
+	"Invalid UTF-8 encoding: byte order markers are not permitted",
 	"Invalid UTF-8 encoding: unexpected continuation byte",
 	"Invalid UTF-8 encoding: sequence too long (> 4 bytes)",
 	"Invalid UTF-8 encoding: hit EOF while decoding sequence",
@@ -108,10 +110,11 @@ s32 next_char(LexerState *state) {
 		state->lines[state->location.line - 1] = state->file + state->index;
 		state->in_indent = true;
 	}
-retry:;
+retry:
 	if (state->index == state->len) {
 		return -1;
 	}
+	b32 first_char = state->index == 0;
 	s32 c = state->file[state->index++];
 	state->last_not_newline = c != '\n';
 	if (c == 0xff) {
@@ -150,6 +153,12 @@ retry:;
 		for (u32 i = 1; i < count; i++) {
 			c |= chars[i] << (count - i - 1) * 6;
 		}
+		if (first_char && c == 0xfeff) {
+			report_error_single_line(state, LEX_ERROR_UTF8_BOM_NOT_ALLOWED,
+			                         state->location, state->location.column);
+			goto retry;
+		}
+		// TODO forbid invalid encodings (e.g. encoding an ASCII character in a multi-byte sequence).
 		if (c > 0x10ffff) {
 			report_error_single_line(state, LEX_ERROR_UTF8_CODE_POINT_TOO_HIGH,
 			                         state->location, state->location.column);
