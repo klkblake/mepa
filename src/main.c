@@ -55,7 +55,6 @@ typedef struct {
 	u32 index;
 	u32 len;
 	b32 last_not_newline;
-	b32 in_indent;
 	u8 **lines;
 	Location location;
 	LexerError *errors;
@@ -85,39 +84,42 @@ s32 peek(LexerState *state) {
 	if (state->index == state->len) {
 		return -1;
 	}
-	return state->file[state->index];
+	s32 c = state->file[state->index];
+	u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
+	if (seq_len > 0) {
+		u32 index = state->index + 1;
+		c &= 0xff >> seq_len;
+		c <<= (seq_len - 1) * 6;
+		for (u32 i = 0; i < seq_len - 1; i++) {
+			c |= (state->file[index++] & 0x7f) << (seq_len - i - 2) * 6;
+		}
+	}
+	return c;
 }
 
 internal
-s32 next_char(LexerState *state) {
+void advance(LexerState *state) {
 	if (state->last_not_newline) {
 		state->location.column++;
 	} else {
 		state->location.line++;
 		state->location.column = 1;
 		state->lines[state->location.line - 1] = state->file + state->index;
-		state->in_indent = true;
 	}
-	if (state->index == state->len) {
-		return -1;
-	}
-	s32 c = state->file[state->index++];
-	state->last_not_newline = c != '\n';
-	u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
-	if (count > 0) {
-		u8 chars[count];
-		chars[0] = (u8)c;
-		chars[0] <<= count;
-		chars[0] >>= count;
-		for (u32 i = 1; i < count; i++) {
-			chars[i] = state->file[state->index++];
-			chars[i] &= 0x7f;
-		}
-		c = chars[0] << (count - 1) * 6;
-		for (u32 i = 1; i < count; i++) {
-			c |= chars[i] << (count - i - 1) * 6;
+	if (state->index < state->len) {
+		s32 c = state->file[state->index++];
+		state->last_not_newline = c != '\n';
+		u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
+		if (seq_len > 0) {
+			state->index += seq_len - 1;
 		}
 	}
+}
+
+internal
+s32 next_char(LexerState *state) {
+	s32 c = peek(state);
+	advance(state);
 	return c;
 }
 
