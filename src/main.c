@@ -169,11 +169,9 @@ retry:
 
 internal
 b32 in_unicode_range(u32 c, UnicodeRange16 *table16, u32 size16, UnicodeRange32 *table32, u32 size32) {
-	// TODO uncomment after testing binary search
-	/*
 	if (c <= 0xff) {
-		for (u32 i = 0; i < array_count(xid_start_table); i++) {
-			UnicodeRange range = xid_start_table[i];
+		for (u32 i = 0; i < size16; i++) {
+			UnicodeRange16 range = table16[i];
 			if (range.start > c) {
 				return false;
 			}
@@ -183,7 +181,6 @@ b32 in_unicode_range(u32 c, UnicodeRange16 *table16, u32 size16, UnicodeRange32 
 		}
 		return false;
 	}
-	*/
 	if (c <= 0xffff) {
 		u32 lo = 0;
 		u32 hi = size16 - 1;
