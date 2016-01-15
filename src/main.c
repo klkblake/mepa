@@ -234,7 +234,7 @@ void next_token(LexerState *state, Token *token) {
 #define ADD_WHILE(expr) \
 	c = peek(state); \
 	while (expr) { \
-		next_char(state); \
+		advance(state); \
 		c = peek(state); \
 	} \
 	token->len = (u32) (state->file + state->index - token->start)
@@ -274,13 +274,13 @@ void next_token(LexerState *state, Token *token) {
 				if (c == '/') {
 					next = peek(state);
 					if (next == '*') {
-						next_char(state);
+						advance(state);
 						depth++;
 					}
 				} else if (c == '*') {
 					next = peek(state);
 					if (next == '/') {
-						next_char(state);
+						advance(state);
 						depth--;
 					}
 				}
@@ -326,15 +326,14 @@ void next_token(LexerState *state, Token *token) {
 				                         token->location, state->location.column);
 				break;
 			}
-			next_char(state);
+			advance(state);
 			if (c == '"') {
 				break;
 			}
 			if (c == '\\') {
 				c = peek(state);
 				if (c == '"') {
-					// TODO replace next_char() with advance() where possible
-					next_char(state);
+					advance(state);
 				}
 			}
 		}
