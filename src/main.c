@@ -126,7 +126,9 @@ retry:
 	state->last_not_newline = c != '\n';
 	if (c == 0xff) {
 		report_error_single_char(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE);
-		// TODO skip continuation bytes here
+		while (state->index < state->len && state->file[state->index] >> 6 == 2) {
+			state->index++;
+		}
 		goto retry;
 	}
 	u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
@@ -135,7 +137,9 @@ retry:
 		goto retry;
 	} else if (count > 4) {
 		report_error_single_char(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE);
-		// TODO skip continuation bytes here
+		while (state->index < state->len && state->file[state->index] >> 6 == 2) {
+			state->index++;
+		}
 		goto retry;
 	} else if (count != 0) {
 		u8 chars[count];
