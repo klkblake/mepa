@@ -515,7 +515,6 @@ int format_main(int argc, char **argv) {
 		file = nonnull_or_die(fopen(argv[2], "r"));
 		fname = argv[2];
 	}
-	// TODO check that the length actually fits into a u32
 	u32 cap = 4096;
 	u32 size = 0;
 	u8 *contents = malloc(cap);
@@ -539,7 +538,12 @@ int format_main(int argc, char **argv) {
 		if (done) {
 			break;
 		}
-		cap += cap >> 1;
+		u32 newcap = cap + (cap >> 1);
+		if (newcap < cap) {
+			fprintf(stderr, "%s exceeds maximum file size of 4GB\n", fname);
+			return 1;
+		}
+		cap = newcap;
 		contents = realloc(contents, cap);
 	}
 	if (size == 0) {
