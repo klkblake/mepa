@@ -95,6 +95,11 @@ void report_error_single_line(LexerState *state, LexerErrorType type, Location l
 }
 
 internal
+void report_error_single_char(LexerState *state, LexerErrorType type) {
+	report_error_single_line(state, type, state->location, state->location.column);
+}
+
+internal
 s32 peek(LexerState *state) {
 	if (state->index == state->len) {
 		return -1;
@@ -120,19 +125,16 @@ retry:
 	s32 c = state->file[state->index++];
 	state->last_not_newline = c != '\n';
 	if (c == 0xff) {
-		report_error_single_line(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
-		                         state->location, state->location.column);
+		report_error_single_char(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE);
 		// TODO skip continuation bytes here
 		goto retry;
 	}
 	u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 	if (count == 1) {
-		report_error_single_line(state, LEX_ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR,
-		                         state->location, state->location.column);
+		report_error_single_char(state, LEX_ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR);
 		goto retry;
 	} else if (count > 4) {
-		report_error_single_line(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
-		                         state->location, state->location.column);
+		report_error_single_char(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE);
 		// TODO skip continuation bytes here
 		goto retry;
 	} else if (count != 0) {
@@ -142,14 +144,12 @@ retry:
 		chars[0] >>= count;
 		for (u32 i = 1; i < count; i++) {
 			if (state->index == state->len) {
-				report_error_single_line(state, LEX_ERROR_UTF8_EOF_IN_SEQUENCE,
-				                         state->location, state->location.column);
+				report_error_single_char(state, LEX_ERROR_UTF8_EOF_IN_SEQUENCE);
 				return -1;
 			}
 			chars[i] = state->file[state->index++];
 			if ((chars[i] >> 6) != 2) {
-				report_error_single_line(state, LEX_ERROR_UTF8_SEQUENCE_TOO_SHORT,
-				                         state->location, state->location.column);
+				report_error_single_char(state, LEX_ERROR_UTF8_SEQUENCE_TOO_SHORT);
 				goto retry;
 			}
 			chars[i] &= 0x7f;
@@ -159,20 +159,17 @@ retry:
 			c |= chars[i] << (count - i - 1) * 6;
 		}
 		if (first_char && c == 0xfeff) {
-			report_error_single_line(state, LEX_ERROR_UTF8_BOM_NOT_ALLOWED,
-			                         state->location, state->location.column);
+			report_error_single_char(state, LEX_ERROR_UTF8_BOM_NOT_ALLOWED);
 			goto retry;
 		}
 		if (c <= 0x7f ||
 		    count > 2 && c <= 0x7ff ||
 		    count > 3 && c <= 0xffff) {
-			report_error_single_line(state, LEX_ERROR_UTF8_WRONG_SEQUENCE_LENGTH,
-			                         state->location, state->location.column);
+			report_error_single_char(state, LEX_ERROR_UTF8_WRONG_SEQUENCE_LENGTH);
 			goto retry;
 		}
 		if (c > 0x10ffff) {
-			report_error_single_line(state, LEX_ERROR_UTF8_CODE_POINT_TOO_HIGH,
-			                         state->location, state->location.column);
+			report_error_single_char(state, LEX_ERROR_UTF8_CODE_POINT_TOO_HIGH);
 			goto retry;
 		}
 	}
