@@ -353,6 +353,7 @@ typedef enum {
 	UTF8_ERROR_EOF_IN_SEQUENCE,
 	UTF8_ERROR_SEQUENCE_TOO_SHORT,
 	UTF8_ERROR_WRONG_SEQUENCE_LENGTH,
+	UTF8_ERROR_SURROGATES_NOT_ALLOWED,
 	UTF8_ERROR_CODE_POINT_TOO_HIGH,
 } UTF8ErrorType;
 
@@ -364,6 +365,7 @@ char *utf8_error_messages[] = {
 	"hit EOF while decoding sequence",
 	"too few of continuation bytes in sequence",
 	"sequence length too long for code point",
+	"surrogates are not permitted",
 	"code point exceeded limit of 0x10ffff",
 };
 
@@ -400,7 +402,6 @@ u8 *validate_utf8(u8 *data, u32 size, UTF8Error **errors, u32 *error_count) {
 	u8 *line = NULL;
 #define report_utf8_error(type) report_utf8_error_(errors, error_count, &error_cap, type, location, line)
 	while (index < size) {
-		// TODO surrogates?
 		if (last_not_newline) {
 			location.column++;
 		} else {
@@ -458,6 +459,10 @@ u8 *validate_utf8(u8 *data, u32 size, UTF8Error **errors, u32 *error_count) {
 				    count > 2 && c <= 0x7ff ||
 				    count > 3 && c <= 0xffff) {
 					report_utf8_error(UTF8_ERROR_WRONG_SEQUENCE_LENGTH);
+					continue;
+				}
+				if (c >= 0xd800 && c <= 0xdfff) {
+					report_utf8_error(UTF8_ERROR_SURROGATES_NOT_ALLOWED);
 					continue;
 				}
 				if (c > 0x10ffff) {
