@@ -38,6 +38,7 @@ typedef enum {
 	LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
 	LEX_ERROR_UTF8_EOF_IN_SEQUENCE,
 	LEX_ERROR_UTF8_SEQUENCE_TOO_SHORT,
+	LEX_ERROR_UTF8_WRONG_SEQUENCE_LENGTH,
 	LEX_ERROR_UTF8_CODE_POINT_TOO_HIGH,
 	LEX_ERROR_EOF_IN_COMMENT,
 	LEX_ERROR_EOF_IN_STRING,
@@ -50,6 +51,7 @@ internal char *lexer_error_messages[] = {
 	"Invalid UTF-8 encoding: sequence too long (> 4 bytes)",
 	"Invalid UTF-8 encoding: hit EOF while decoding sequence",
 	"Invalid UTF-8 encoding: too few of continuation bytes in sequence",
+	"Invalid UTF-8 encoding: sequence length too long for code point",
 	"Invalid UTF-8 encoding: code point exceeded limit of 0x10ffff",
 	"Hit EOF while looking for end of comment",
 	"Hit EOF while looking for end of string",
@@ -120,6 +122,7 @@ retry:
 	if (c == 0xff) {
 		report_error_single_line(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
 		                         state->location, state->location.column);
+		// TODO skip continuation bytes here
 		goto retry;
 	}
 	u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
@@ -130,6 +133,8 @@ retry:
 	} else if (count > 4) {
 		report_error_single_line(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
 		                         state->location, state->location.column);
+		// TODO skip continuation bytes here
+		goto retry;
 	} else if (count != 0) {
 		u8 chars[count];
 		chars[0] = (u8)c;
@@ -158,10 +163,17 @@ retry:
 			                         state->location, state->location.column);
 			goto retry;
 		}
-		// TODO forbid invalid encodings (e.g. encoding an ASCII character in a multi-byte sequence).
+		if (c <= 0x7f ||
+		    count > 2 && c <= 0x7ff ||
+		    count > 3 && c <= 0xffff) {
+			report_error_single_line(state, LEX_ERROR_UTF8_WRONG_SEQUENCE_LENGTH,
+			                         state->location, state->location.column);
+			goto retry;
+		}
 		if (c > 0x10ffff) {
 			report_error_single_line(state, LEX_ERROR_UTF8_CODE_POINT_TOO_HIGH,
 			                         state->location, state->location.column);
+			goto retry;
 		}
 	}
 	return c;
