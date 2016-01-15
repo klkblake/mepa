@@ -33,26 +33,12 @@ typedef struct {
 } Token;
 
 typedef enum {
-	LEX_ERROR_UTF8_BOM_NOT_ALLOWED,
-	LEX_ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR,
-	LEX_ERROR_UTF8_OVERLONG_SEQUENCE,
-	LEX_ERROR_UTF8_EOF_IN_SEQUENCE,
-	LEX_ERROR_UTF8_SEQUENCE_TOO_SHORT,
-	LEX_ERROR_UTF8_WRONG_SEQUENCE_LENGTH,
-	LEX_ERROR_UTF8_CODE_POINT_TOO_HIGH,
 	LEX_ERROR_EOF_IN_COMMENT,
 	LEX_ERROR_EOF_IN_STRING,
 	LEX_ERROR_UNTERMINATED_STRING,
 } LexerErrorType;
 
 internal char *lexer_error_messages[] = {
-	"Invalid UTF-8 encoding: byte order markers are not permitted",
-	"Invalid UTF-8 encoding: unexpected continuation byte",
-	"Invalid UTF-8 encoding: sequence too long (> 4 bytes)",
-	"Invalid UTF-8 encoding: hit EOF while decoding sequence",
-	"Invalid UTF-8 encoding: too few of continuation bytes in sequence",
-	"Invalid UTF-8 encoding: sequence length too long for code point",
-	"Invalid UTF-8 encoding: code point exceeded limit of 0x10ffff",
 	"Hit EOF while looking for end of comment",
 	"Hit EOF while looking for end of string",
 	"String was not terminated before end of line",
@@ -95,11 +81,6 @@ void report_error_single_line(LexerState *state, LexerErrorType type, Location l
 }
 
 internal
-void report_error_single_char(LexerState *state, LexerErrorType type) {
-	report_error_single_line(state, type, state->location, state->location.column);
-}
-
-internal
 s32 peek(LexerState *state) {
 	if (state->index == state->len) {
 		return -1;
@@ -117,64 +98,24 @@ s32 next_char(LexerState *state) {
 		state->lines[state->location.line - 1] = state->file + state->index;
 		state->in_indent = true;
 	}
-retry:
 	if (state->index == state->len) {
 		return -1;
 	}
-	b32 first_char = state->index == 0;
 	s32 c = state->file[state->index++];
 	state->last_not_newline = c != '\n';
-	if (c == 0xff) {
-		report_error_single_char(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE);
-		while (state->index < state->len && state->file[state->index] >> 6 == 2) {
-			state->index++;
-		}
-		goto retry;
-	}
 	u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
-	if (count == 1) {
-		report_error_single_char(state, LEX_ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR);
-		goto retry;
-	} else if (count > 4) {
-		report_error_single_char(state, LEX_ERROR_UTF8_OVERLONG_SEQUENCE);
-		while (state->index < state->len && state->file[state->index] >> 6 == 2) {
-			state->index++;
-		}
-		goto retry;
-	} else if (count != 0) {
+	if (count > 0) {
 		u8 chars[count];
 		chars[0] = (u8)c;
 		chars[0] <<= count;
 		chars[0] >>= count;
 		for (u32 i = 1; i < count; i++) {
-			if (state->index == state->len) {
-				report_error_single_char(state, LEX_ERROR_UTF8_EOF_IN_SEQUENCE);
-				return -1;
-			}
 			chars[i] = state->file[state->index++];
-			if ((chars[i] >> 6) != 2) {
-				report_error_single_char(state, LEX_ERROR_UTF8_SEQUENCE_TOO_SHORT);
-				goto retry;
-			}
 			chars[i] &= 0x7f;
 		}
 		c = chars[0] << (count - 1) * 6;
 		for (u32 i = 1; i < count; i++) {
 			c |= chars[i] << (count - i - 1) * 6;
-		}
-		if (first_char && c == 0xfeff) {
-			report_error_single_char(state, LEX_ERROR_UTF8_BOM_NOT_ALLOWED);
-			goto retry;
-		}
-		if (c <= 0x7f ||
-		    count > 2 && c <= 0x7ff ||
-		    count > 3 && c <= 0xffff) {
-			report_error_single_char(state, LEX_ERROR_UTF8_WRONG_SEQUENCE_LENGTH);
-			goto retry;
-		}
-		if (c > 0x10ffff) {
-			report_error_single_char(state, LEX_ERROR_UTF8_CODE_POINT_TOO_HIGH);
-			goto retry;
 		}
 	}
 	return c;
@@ -405,6 +346,129 @@ void next_token(LexerState *state, Token *token) {
 	token->type = TOK_UNKNOWN;
 }
 
+typedef enum {
+	UTF8_ERROR_BOM_NOT_ALLOWED,
+	UTF8_ERROR_UNEXPECTED_CONTINUATION_CHAR,
+	UTF8_ERROR_OVERLONG_SEQUENCE,
+	UTF8_ERROR_EOF_IN_SEQUENCE,
+	UTF8_ERROR_SEQUENCE_TOO_SHORT,
+	UTF8_ERROR_WRONG_SEQUENCE_LENGTH,
+	UTF8_ERROR_CODE_POINT_TOO_HIGH,
+} UTF8ErrorType;
+
+internal
+char *utf8_error_messages[] = {
+	"byte order markers are not permitted",
+	"unexpected continuation byte",
+	"sequence too long (> 4 bytes)",
+	"hit EOF while decoding sequence",
+	"too few of continuation bytes in sequence",
+	"sequence length too long for code point",
+	"code point exceeded limit of 0x10ffff",
+};
+
+typedef struct {
+	UTF8ErrorType type;
+	Location location;
+	u8 *line;
+} UTF8Error;
+
+internal
+void report_utf8_error_(UTF8Error **errors, u32 *error_count, u32 *error_cap,
+                       UTF8ErrorType type, Location location, u8 *line) {
+	// TODO consider cap on number of error messages instead of growing dynamically
+	if (!*errors) {
+		*error_cap = 8;
+		*errors = malloc(*error_cap * sizeof(UTF8Error));
+	}
+	if (*error_count == *error_cap) {
+		*error_cap += *error_cap >> 1;
+		*errors = realloc(*errors, *error_cap * sizeof(UTF8Error));
+	}
+	UTF8Error *error = (*errors) + (*error_count)++;
+	error->type = type;
+	error->location = location;
+	error->line = line;
+}
+
+internal
+u8 *validate_utf8(u8 *data, u32 size, UTF8Error **errors, u32 *error_count) {
+	u32 index = 0;
+	b32 last_not_newline = false;
+	u32 error_cap;
+	Location location = {};
+	u8 *line = NULL;
+#define report_utf8_error(type) report_utf8_error_(errors, error_count, &error_cap, type, location, line)
+	while (index < size) {
+		// TODO surrogates?
+		if (last_not_newline) {
+			location.column++;
+		} else {
+			location.line++;
+			location.column = 1;
+			line = data + index;
+		}
+		while (index < size) {
+			b32 first_char = index == 0;
+			s32 c = data[index++];
+			last_not_newline = c != '\n';
+			if (c == 0xff) {
+				report_utf8_error(UTF8_ERROR_OVERLONG_SEQUENCE);
+				while (index < size && data[index] >> 6 == 2) {
+					index++;
+				}
+				continue;
+			}
+			u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
+			if (count == 1) {
+				report_utf8_error(UTF8_ERROR_UNEXPECTED_CONTINUATION_CHAR);
+				continue;
+			} else if (count > 4) {
+				report_utf8_error(UTF8_ERROR_OVERLONG_SEQUENCE);
+				while (index < size && data[index] >> 6 == 2) {
+					index++;
+				}
+				continue;
+			} else if (count != 0) {
+				u8 chars[count];
+				chars[0] = (u8)c;
+				chars[0] <<= count;
+				chars[0] >>= count;
+				for (u32 i = 1; i < count; i++) {
+					if (index == size) {
+						report_utf8_error(UTF8_ERROR_EOF_IN_SEQUENCE);
+						break;
+					}
+					chars[i] = data[index++];
+					if ((chars[i] >> 6) != 2) {
+						report_utf8_error(UTF8_ERROR_SEQUENCE_TOO_SHORT);
+						continue;
+					}
+					chars[i] &= 0x7f;
+				}
+				c = chars[0] << (count - 1) * 6;
+				for (u32 i = 1; i < count; i++) {
+					c |= chars[i] << (count - i - 1) * 6;
+				}
+				if (first_char && c == 0xfeff) {
+					report_utf8_error(UTF8_ERROR_BOM_NOT_ALLOWED);
+					continue;
+				}
+				if (c <= 0x7f ||
+				    count > 2 && c <= 0x7ff ||
+				    count > 3 && c <= 0xffff) {
+					report_utf8_error(UTF8_ERROR_WRONG_SEQUENCE_LENGTH);
+					continue;
+				}
+				if (c > 0x10ffff) {
+					report_utf8_error(UTF8_ERROR_CODE_POINT_TOO_HIGH);
+					continue;
+				}
+			}
+		}
+	}
+	return data;
+}
 
 internal
 void usage() {
@@ -449,6 +513,7 @@ int format_main(int argc, char **argv) {
 		file = nonnull_or_die(fopen(argv[2], "r"));
 		fname = argv[2];
 	}
+	// TODO check that the length actually fits into a u32
 	u32 cap = 4096;
 	u32 size = 0;
 	u8 *contents = malloc(cap);
@@ -480,6 +545,27 @@ int format_main(int argc, char **argv) {
 	}
 	contents = realloc(contents, size);
 	fclose(file);
+	UTF8Error *errors = NULL;
+	u32 error_count = 0;
+	contents = validate_utf8(contents, size, &errors, &error_count);
+	for (u32 i = 0; i < error_count; i++) {
+		UTF8Error *error = errors + i;
+		fprintf(stderr, "%s:%d:%d: Invalid UTF-8 encoding: %s\n",
+		        fname, error->location.line, error->location.column, utf8_error_messages[error->type]);
+		for (u32 j = 0; j < size && error->line[j] != '\n'; j++) {
+			u8 c = error->line[j];
+			if (c < ' ' && c != '\t' || c == 0x7f) {
+				fprintf(stderr, "\ufffd");
+			} else {
+				// TODO speed this up
+				fputc(c, stderr);
+			}
+		}
+		fputc('\n', stderr);
+	}
+	if (error_count > 0) {
+		return 1;
+	}
 	if (contents[size - 1] != '\n') {
 		lines++;
 	}
