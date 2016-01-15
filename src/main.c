@@ -223,7 +223,9 @@ b32 is_bracket(s32 c) {
 internal
 void next_token(LexerState *state, Token *token) {
 	s32 c;
+	token->start = state->file + state->index;
 	c = next_char(state);
+	token->len = (u32) (state->file + state->index - token->start);
 	if (c == -1) {
 		token->type = TOK_EOF;
 		token->location = state->location;
@@ -233,12 +235,9 @@ void next_token(LexerState *state, Token *token) {
 	c = peek(state); \
 	while (expr) { \
 		next_char(state); \
-		token->len++; \
 		c = peek(state); \
-	}
-	// TODO state->file is in bytes, not codepoints
-	token->start = state->file + state->index - 1;
-	token->len = 1;
+	} \
+	token->len = (u32) (state->file + state->index - token->start)
 	if (c == '\n') {
 		token->type = TOK_NEWLINE;
 		ADD_WHILE(c == '\t');
@@ -263,33 +262,30 @@ void next_token(LexerState *state, Token *token) {
 		} else if (next == '*') {
 			token->type = TOK_COMMENT;
 			next_char(state);
-			token->len++;
 			u32 depth = 1;
 			while (depth > 0) {
 				c = peek(state);
 				if (c == -1) {
 					report_error_single_line(state, LEX_ERROR_EOF_IN_COMMENT,
 					                         token->location, token->location.column + 1);
-					return;
+					break;
 				}
 				next_char(state);
-				token->len++;
 				if (c == '/') {
 					next = peek(state);
 					if (next == '*') {
 						next_char(state);
-						token->len++;
 						depth++;
 					}
 				} else if (c == '*') {
 					next = peek(state);
 					if (next == '/') {
 						next_char(state);
-						token->len++;
 						depth--;
 					}
 				}
 			}
+			token->len = (u32) (state->file + state->index - token->start);
 			return;
 		}
 	}
@@ -331,18 +327,18 @@ void next_token(LexerState *state, Token *token) {
 				break;
 			}
 			next_char(state);
-			token->len++;
 			if (c == '"') {
 				break;
 			}
 			if (c == '\\') {
 				c = peek(state);
 				if (c == '"') {
+					// TODO replace next_char() with advance() where possible
 					next_char(state);
-					token->len++;
 				}
 			}
 		}
+		token->len = (u32) (state->file + state->index - token->start);
 		return;
 	}
 	token->type = TOK_UNKNOWN;
