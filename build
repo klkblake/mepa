@@ -21,7 +21,7 @@ if [[ DEBUG == no ]]; then
 	CFLAGS="-O3 $CFLAGS"
 fi
 
-CFLAGS="-Wall -Weverything -Wno-gnu-empty-initializer -Wno-zero-length-array -Wno-vla -Wno-padded -Wno-logical-op-parentheses -Wno-reserved-id-macro -Wno-missing-prototypes $CFLAGS"
+CFLAGS="-Wall -Weverything -Wno-gnu-folding-constant -Wno-gnu-empty-initializer -Wno-zero-length-array -Wno-vla -Wno-padded -Wno-logical-op-parentheses -Wno-reserved-id-macro -Wno-missing-prototypes $CFLAGS"
 
 CFLAGS="-std=gnu11 -x c $CFLAGS"
 

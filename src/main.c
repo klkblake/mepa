@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <getopt.h>
+#include <errno.h>
 
 typedef struct {
 	char *file;
@@ -381,7 +383,6 @@ typedef struct UTF8Errors {
 
 internal
 void report_utf8_error_(UTF8Errors *errors, UTF8ErrorType type, Location location, u8 *line) {
-	// TODO provide option to override error limit
 	if (!errors->errors) {
 		errors->cap = 8;
 		errors->errors = malloc(errors->cap * sizeof(UTF8Error));
@@ -506,7 +507,7 @@ void *nonnull_or_die(void *ptr) {
 }
 
 internal
-int help_main(int argc, char **argv) {
+int help_main(int argc, char *argv[static argc]) {
 	(void) argc;
 	(void) argv;
 	usage();
@@ -514,15 +515,53 @@ int help_main(int argc, char **argv) {
 }
 
 internal
-int format_main(int argc, char **argv) {
+int format_main(int argc, char *argv[static argc]) {
 	FILE *file;
 	char *fname;
-	if (argc == 2 || strcmp(argv[2], "-") == 0) {
+	u32 error_limit = 20;
+
+	const int CODE_ERROR_LIMIT = 256;
+	struct option longopts[] = {
+		{ "error-limit", required_argument, NULL, CODE_ERROR_LIMIT },
+		{ NULL, 0, NULL, 0 },
+	};
+	int option;
+	while ((option = getopt_long(argc, argv, "", longopts, NULL)) != -1) {
+		switch (option) {
+		case 0: continue;
+		case CODE_ERROR_LIMIT:
+		{
+			if (*optarg == 0) {
+				fprintf(stderr, "Empty argument to --error-limit\n");
+				return 1;
+			}
+			char *endptr;
+			errno = 0;
+			s64 value = strtol(optarg, &endptr, 10);
+			if (*endptr != 0) {
+				fprintf(stderr, "Invalid number in argument to --error-limit\n");
+				return 1;
+			}
+			if (errno == ERANGE || value < 0 || value >= (1ll << 32)) {
+				fprintf(stderr, "Argument to --error-limit out of range\n");
+				return 1;
+			}
+			error_limit = (u32)value;
+			break;
+		}
+		case '?': return 1;
+		}
+	}
+	if (argc - optind > 1) {
+		fprintf(stderr, "format expects exactly one file");
+		return 1;
+	}
+	if (optind == argc || strcmp(argv[optind], "-") == 0) {
 		file = stdin;
 		fname = "<stdin>";
 	} else {
-		file = nonnull_or_die(fopen(argv[2], "r"));
-		fname = argv[2];
+		file = nonnull_or_die(fopen(argv[optind], "r"));
+		fname = argv[optind];
 	}
 	u32 cap = 4096;
 	u32 size = 0;
@@ -561,7 +600,7 @@ int format_main(int argc, char **argv) {
 	contents = realloc(contents, size);
 	fclose(file);
 	UTF8Errors errors = {};
-	errors.limit = 20;
+	errors.limit = error_limit;
 	contents = validate_utf8(contents, size, &errors);
 	u32 num_errors = errors.count;
 	if (errors.limit && errors.count > errors.limit) {
@@ -670,11 +709,12 @@ Command commands[] = {
 
 int main(int argc, char **argv) {
 	if (argc == 1) {
-		return help_main(argc, argv);
+		usage();
+		return 1; // TODO look at sysexits.h
 	}
 	for (u32 i = 0; i < array_count(commands); i++) {
 		if (strcmp(argv[1], commands[i].command) == 0) {
-			return commands[i].func(argc, argv);
+			return commands[i].func(argc - 1, argv + 1);
 		}
 	}
 	fprintf(stderr, "Unknown command %s\n", argv[1]);
