@@ -5,6 +5,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <errno.h>
+#include <sysexits.h>
 
 typedef struct {
 	char *file;
@@ -493,15 +494,15 @@ void usage() {
 }
 
 internal __attribute__((noreturn))
-void die() {
+void die(u8 code) {
 	perror("mepa");
-	exit(1);
+	exit(code);
 }
 
 internal
-void *nonnull_or_die(void *ptr) {
+void *nonnull_or_die(void *ptr, u8 code) {
 	if (ptr == NULL) {
-		die();
+		die(code);
 	}
 	return ptr;
 }
@@ -533,34 +534,34 @@ int format_main(int argc, char *argv[static argc]) {
 		{
 			if (*optarg == 0) {
 				fprintf(stderr, "Empty argument to --error-limit\n");
-				return 1;
+				return EX_USAGE;
 			}
 			char *endptr;
 			errno = 0;
 			s64 value = strtol(optarg, &endptr, 10);
 			if (*endptr != 0) {
 				fprintf(stderr, "Invalid number in argument to --error-limit\n");
-				return 1;
+				return EX_USAGE;
 			}
 			if (errno == ERANGE || value < 0 || value >= (1ll << 32)) {
 				fprintf(stderr, "Argument to --error-limit out of range\n");
-				return 1;
+				return EX_USAGE;
 			}
 			error_limit = (u32)value;
 			break;
 		}
-		case '?': return 1;
+		case '?': return EX_USAGE;
 		}
 	}
 	if (argc - optind > 1) {
 		fprintf(stderr, "format expects exactly one file");
-		return 1;
+		return EX_USAGE;
 	}
 	if (optind == argc || strcmp(argv[optind], "-") == 0) {
 		file = stdin;
 		fname = "<stdin>";
 	} else {
-		file = nonnull_or_die(fopen(argv[optind], "r"));
+		file = nonnull_or_die(fopen(argv[optind], "r"), EX_NOINPUT);
 		fname = argv[optind];
 	}
 	u32 cap = 4096;
@@ -573,7 +574,7 @@ int format_main(int argc, char *argv[static argc]) {
 		b32 done = false;
 		if (result != wanted) {
 			if (ferror(file)) {
-				die();
+				die(EX_NOINPUT);
 			}
 			done = true;
 		}
@@ -589,7 +590,7 @@ int format_main(int argc, char *argv[static argc]) {
 		u32 newcap = cap + (cap >> 1);
 		if (newcap < cap) {
 			fprintf(stderr, "%s exceeds maximum file size of 4GB\n", fname);
-			return 1;
+			return EX_DATAERR;
 		}
 		cap = newcap;
 		contents = realloc(contents, cap);
@@ -710,7 +711,7 @@ Command commands[] = {
 int main(int argc, char **argv) {
 	if (argc == 1) {
 		usage();
-		return 1; // TODO look at sysexits.h
+		return EX_USAGE;
 	}
 	for (u32 i = 0; i < array_count(commands); i++) {
 		if (strcmp(argv[1], commands[i].command) == 0) {
@@ -719,5 +720,5 @@ int main(int argc, char **argv) {
 	}
 	fprintf(stderr, "Unknown command %s\n", argv[1]);
 	usage();
-	return 1;
+	return EX_USAGE;
 }
