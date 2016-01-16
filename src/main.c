@@ -372,32 +372,41 @@ typedef struct {
 	u8 *line;
 } UTF8Error;
 
+typedef struct UTF8Errors {
+	UTF8Error *errors;
+	u32 count;
+	u32 cap;
+	u32 limit;
+} UTF8Errors;
+
 internal
-void report_utf8_error_(UTF8Error **errors, u32 *error_count, u32 *error_cap,
-                       UTF8ErrorType type, Location location, u8 *line) {
-	// TODO consider cap on number of error messages instead of growing dynamically
-	if (!*errors) {
-		*error_cap = 8;
-		*errors = malloc(*error_cap * sizeof(UTF8Error));
+void report_utf8_error_(UTF8Errors *errors, UTF8ErrorType type, Location location, u8 *line) {
+	// TODO provide option to override error limit
+	if (!errors->errors) {
+		errors->cap = 8;
+		errors->errors = malloc(errors->cap * sizeof(UTF8Error));
 	}
-	if (*error_count == *error_cap) {
-		*error_cap += *error_cap >> 1;
-		*errors = realloc(*errors, *error_cap * sizeof(UTF8Error));
+	if (errors->limit && errors->count >= errors->limit) {
+		errors->count++;
+		return;
 	}
-	UTF8Error *error = (*errors) + (*error_count)++;
+	if (errors->count == errors->cap) {
+		errors->cap += errors->cap >> 1;
+		errors->errors = realloc(errors->errors, errors->cap * sizeof(UTF8Error));
+	}
+	UTF8Error *error = &errors->errors[errors->count++];
 	error->type = type;
 	error->location = location;
 	error->line = line;
 }
 
 internal
-u8 *validate_utf8(u8 *data, u32 size, UTF8Error **errors, u32 *error_count) {
+u8 *validate_utf8(u8 *data, u32 size, UTF8Errors *errors) {
 	u32 index = 0;
 	b32 last_not_newline = false;
-	u32 error_cap;
 	Location location = {};
 	u8 *line = NULL;
-#define report_utf8_error(type) report_utf8_error_(errors, error_count, &error_cap, type, location, line)
+#define report_utf8_error(type) report_utf8_error_(errors, type, location, line)
 	while (index < size) {
 		if (last_not_newline) {
 			location.column++;
@@ -551,11 +560,15 @@ int format_main(int argc, char **argv) {
 	}
 	contents = realloc(contents, size);
 	fclose(file);
-	UTF8Error *errors = NULL;
-	u32 error_count = 0;
-	contents = validate_utf8(contents, size, &errors, &error_count);
-	for (u32 i = 0; i < error_count; i++) {
-		UTF8Error *error = errors + i;
+	UTF8Errors errors = {};
+	errors.limit = 20;
+	contents = validate_utf8(contents, size, &errors);
+	u32 num_errors = errors.count;
+	if (errors.limit && errors.count > errors.limit) {
+		num_errors = errors.limit;
+	}
+	for (u32 i = 0; i < num_errors; i++) {
+		UTF8Error *error = &errors.errors[i];
 		fprintf(stderr, "%s:%d:%d: Invalid UTF-8 encoding: %s\n",
 		        fname, error->location.line, error->location.column, utf8_error_messages[error->type]);
 		u32 line_size = (u32)((u8 *)strchrnul((char *)error->line, '\n') - error->line);
@@ -574,7 +587,12 @@ int format_main(int argc, char **argv) {
 		}
 		fprintf(stderr, "%.*s\n", buf_size, buf);
 	}
-	if (error_count > 0) {
+	if (num_errors == errors.count) {
+		fprintf(stderr, "%u errors\n", num_errors);
+	} else {
+		fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
+	}
+	if (errors.count > 0) {
 		return 1;
 	}
 	if (contents[size - 1] != '\n') {
