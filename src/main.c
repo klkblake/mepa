@@ -558,16 +558,21 @@ int format_main(int argc, char **argv) {
 		UTF8Error *error = errors + i;
 		fprintf(stderr, "%s:%d:%d: Invalid UTF-8 encoding: %s\n",
 		        fname, error->location.line, error->location.column, utf8_error_messages[error->type]);
-		for (u32 j = 0; j < size && error->line[j] != '\n'; j++) {
+		u32 line_size = (u32)((u8 *)strchrnul((char *)error->line, '\n') - error->line);
+		u8 buf[line_size * 3];
+		u32 buf_size = 0;
+		for (u32 j = 0; j < line_size; j++) {
 			u8 c = error->line[j];
 			if (c < ' ' && c != '\t' || c == 0x7f) {
-				fprintf(stderr, "\ufffd");
+				// Map control codes to control pictures
+				buf[buf_size++] = 0xe2;
+				buf[buf_size++] = 0x90;
+				buf[buf_size++] = 0x80 | c;
 			} else {
-				// TODO speed this up
-				fputc(c, stderr);
+				buf[buf_size++] = c;
 			}
 		}
-		fputc('\n', stderr);
+		fprintf(stderr, "%.*s\n", buf_size, buf);
 	}
 	if (error_count > 0) {
 		return 1;
