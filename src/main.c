@@ -360,7 +360,7 @@ char *utf8_error_messages[] = {
 	"unexpected continuation byte",
 	"sequence too long (> 4 bytes)",
 	"hit EOF while decoding sequence",
-	"too few of continuation bytes in sequence",
+	"too few continuation bytes in sequence",
 	"sequence length too long for code point",
 	"surrogates are not permitted",
 	"code point exceeded limit of 0x10ffff",
