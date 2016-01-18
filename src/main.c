@@ -8,7 +8,6 @@
 #include <sysexits.h>
 
 typedef struct {
-	char *file;
 	u32 line;
 	u32 column;
 } Location;
@@ -48,53 +47,102 @@ internal char *lexer_error_messages[] = {
 };
 
 typedef struct {
+	Location start;
+	Location end;
+} Range;
+
+typedef struct {
 	LexerErrorType type;
-	Location location_start;
-	Location location_end;
+	Location location;
+	Range range;
 } LexerError;
 
 typedef struct {
-	u8 *file;
-	u32 index;
+	char *name;
+	u8 *data;
 	u32 len;
-	b32 last_not_newline;
 	u8 **lines;
+} SourceFile;
+
+typedef struct {
+	u32 count;
+	u32 limit;
+} ErrorState;
+
+typedef struct {
+	SourceFile file;
+	u32 index;
+	b32 last_not_newline;
 	Location location;
-	LexerError *errors;
-	u32 error_count;
-	u32 error_cap;
+	ErrorState *errors;
 } LexerState;
 
 internal
-void report_error_single_line(LexerState *state, LexerErrorType type, Location location, u32 column_end) {
-	if (!state->errors) {
-		state->error_cap = 8;
-		state->errors = malloc(state->error_cap * sizeof(LexerError));
+void report_error(ErrorState *state, SourceFile *file, LexerErrorType type, Location location, Range range) {
+	state->count++;
+	if (state->limit && state->count > state->limit) {
+		return;
 	}
-	if (state->error_count == state->error_cap) {
-		state->error_cap += state->error_cap >> 1;
-		state->errors = realloc(state->errors, state->error_cap * sizeof(LexerError));
+	fprintf(stderr, "%s:%d:%d: %s\n", file->name, location.line, location.column, lexer_error_messages[type]);
+	u8 *line = file->lines[location.line - 1];
+	u8 *end = (u8 *) strchrnul((char *)line, '\n');
+	u32 size = (u32) (end - line);
+	// TODO should we trust this to not overflow the stack?
+	u8 buf[size * 8];
+	u32 len = 0;
+	for (u32 i = 0; i < size; i++) {
+		if (line[i] == '\t') {
+			for (u32 k = 0; k < 8; k++) {
+				buf[len++] = ' ';
+			}
+		} else {
+			buf[len++] = line[i];
+		}
 	}
-	LexerError *error = &state->errors[state->error_count++];
-	error->type = type;
-	error->location_start = location;
-	error->location_end = location;
-	error->location_end.column = column_end;
+	fprintf(stderr, "%.*s\n", len, buf);
+	// TODO handle utf-8!
+	u32 col_start = 0;
+	if (range.start.line == location.line) {
+		col_start = range.start.column - 1;
+	}
+	u32 col_end = size - 1;
+	if (range.end.line == location.line) {
+		col_end = range.end.column - 1;
+	}
+	len = 0;
+	for (u32 i = 0; i < size; i++) {
+		u8 c;
+		if (i == location.column - 1) {
+			c = '^';
+		} else if (col_start <= i && i <= col_end) {
+			c = '~';
+		} else {
+			c = ' ';
+		}
+		if (line[i] == '\t') {
+			for (u32 k = 0; k < 8; k++) {
+				buf[len++] = c;
+			}
+		} else {
+			buf[len++] = c;
+		}
+	}
+	fprintf(stderr, "%.*s\n", len, buf);
 }
 
 internal
 s32 peek(LexerState *state) {
-	if (state->index == state->len) {
+	if (state->index == state->file.len) {
 		return -1;
 	}
-	s32 c = state->file[state->index];
+	s32 c = state->file.data[state->index];
 	u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 	if (seq_len > 0) {
 		u32 index = state->index + 1;
 		c &= 0xff >> seq_len;
 		for (u32 i = 0; i < seq_len - 1; i++) {
 			c <<= 6;
-			c |= state->file[index++] & 0x7f;
+			c |= state->file.data[index++] & 0x7f;
 		}
 	}
 	return c;
@@ -107,10 +155,9 @@ void advance(LexerState *state) {
 	} else {
 		state->location.line++;
 		state->location.column = 1;
-		state->lines[state->location.line - 1] = state->file + state->index;
 	}
-	if (state->index < state->len) {
-		s32 c = state->file[state->index++];
+	if (state->index < state->file.len) {
+		s32 c = state->file.data[state->index++];
 		state->last_not_newline = c != '\n';
 		u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 		if (seq_len > 0) {
@@ -226,9 +273,9 @@ b32 is_bracket(s32 c) {
 internal
 void next_token(LexerState *state, Token *token) {
 	s32 c;
-	token->start = state->file + state->index;
+	token->start = state->file.data + state->index;
 	c = next_char(state);
-	token->len = (u32) (state->file + state->index - token->start);
+	token->len = (u32) (state->file.data + state->index - token->start);
 	if (c == -1) {
 		token->type = TOK_EOF;
 		token->location = state->location;
@@ -240,7 +287,7 @@ void next_token(LexerState *state, Token *token) {
 		advance(state); \
 		c = peek(state); \
 	} \
-	token->len = (u32) (state->file + state->index - token->start)
+	token->len = (u32) (state->file.data + state->index - token->start)
 	if (c == '\n') {
 		token->type = TOK_NEWLINE;
 		ADD_WHILE(c == '\t');
@@ -251,6 +298,9 @@ void next_token(LexerState *state, Token *token) {
 		return;
 	}
 	token->location = state->location;
+#define REPORT_ERROR(code) \
+	report_error(state->errors, &state->file, code, \
+	             token->location, (Range){token->location, state->location})
 	if (c == ' ') {
 		token->type = TOK_SPACES;
 		ADD_WHILE(c == ' ');
@@ -269,8 +319,7 @@ void next_token(LexerState *state, Token *token) {
 			while (depth > 0) {
 				c = peek(state);
 				if (c == -1) {
-					report_error_single_line(state, LEX_ERROR_EOF_IN_COMMENT,
-					                         token->location, token->location.column + 1);
+					REPORT_ERROR(LEX_ERROR_EOF_IN_COMMENT);
 					break;
 				}
 				next_char(state);
@@ -288,7 +337,7 @@ void next_token(LexerState *state, Token *token) {
 					}
 				}
 			}
-			token->len = (u32) (state->file + state->index - token->start);
+			token->len = (u32) (state->file.data + state->index - token->start);
 			return;
 		}
 	}
@@ -320,13 +369,11 @@ void next_token(LexerState *state, Token *token) {
 		while (true) {
 			c = peek(state);
 			if (c == -1) {
-				report_error_single_line(state, LEX_ERROR_EOF_IN_STRING,
-				                         token->location, state->location.column);
+				REPORT_ERROR(LEX_ERROR_EOF_IN_STRING);
 				break;
 			}
 			if (c == '\n') {
-				report_error_single_line(state, LEX_ERROR_UNTERMINATED_STRING,
-				                         token->location, state->location.column);
+				REPORT_ERROR(LEX_ERROR_UNTERMINATED_STRING);
 				break;
 			}
 			advance(state);
@@ -340,10 +387,12 @@ void next_token(LexerState *state, Token *token) {
 				}
 			}
 		}
-		token->len = (u32) (state->file + state->index - token->start);
+		token->len = (u32) (state->file.data + state->index - token->start);
 		return;
 	}
 	token->type = TOK_UNKNOWN;
+#undef REPORT_ERROR
+#undef ADD_WHILE
 }
 
 typedef enum {
@@ -403,27 +452,26 @@ void report_utf8_error_(UTF8Errors *errors, UTF8ErrorType type, Location locatio
 }
 
 internal
-u8 *validate_utf8(u8 *data, u32 size, UTF8Errors *errors) {
+u8 *validate_utf8(SourceFile *file, UTF8Errors *errors) {
 	u32 index = 0;
 	b32 last_not_newline = false;
 	Location location = {};
-	u8 *line = NULL;
-#define report_utf8_error(type) report_utf8_error_(errors, type, location, line)
-	while (index < size) {
+#define report_utf8_error(type) report_utf8_error_(errors, type, location, file->lines[location.line - 1])
+	while (index < file->len) {
 		if (last_not_newline) {
 			location.column++;
 		} else {
 			location.line++;
 			location.column = 1;
-			line = data + index;
+			file->lines[location.line - 1] = file->data + index;
 		}
-		while (index < size) {
+		while (index < file->len) {
 			b32 first_char = index == 0;
-			s32 c = data[index++];
+			s32 c = file->data[index++];
 			last_not_newline = c != '\n';
 			if (c == 0xff) {
 				report_utf8_error(UTF8_ERROR_OVERLONG_SEQUENCE);
-				while (index < size && data[index] >> 6 == 2) {
+				while (index < file->len && file->data[index] >> 6 == 2) {
 					index++;
 				}
 				continue;
@@ -434,7 +482,7 @@ u8 *validate_utf8(u8 *data, u32 size, UTF8Errors *errors) {
 				continue;
 			} else if (count > 4) {
 				report_utf8_error(UTF8_ERROR_OVERLONG_SEQUENCE);
-				while (index < size && data[index] >> 6 == 2) {
+				while (index < file->len && file->data[index] >> 6 == 2) {
 					index++;
 				}
 				continue;
@@ -444,11 +492,11 @@ u8 *validate_utf8(u8 *data, u32 size, UTF8Errors *errors) {
 				chars[0] <<= count;
 				chars[0] >>= count;
 				for (u32 i = 1; i < count; i++) {
-					if (index == size) {
+					if (index == file->len) {
 						report_utf8_error(UTF8_ERROR_EOF_IN_SEQUENCE);
 						break;
 					}
-					chars[i] = data[index++];
+					chars[i] = file->data[index++];
 					if ((chars[i] >> 6) != 2) {
 						report_utf8_error(UTF8_ERROR_SEQUENCE_TOO_SHORT);
 						continue;
@@ -478,9 +526,10 @@ u8 *validate_utf8(u8 *data, u32 size, UTF8Errors *errors) {
 					continue;
 				}
 			}
+			break;
 		}
 	}
-	return data;
+	return file->data;
 }
 
 internal
@@ -517,9 +566,10 @@ int help_main(int argc, char *argv[static argc]) {
 
 internal
 int format_main(int argc, char *argv[static argc]) {
-	FILE *file;
-	char *fname;
-	u32 error_limit = 20;
+	FILE *file_stream;
+	SourceFile file = {};
+	ErrorState error_state = {}; // TODO rename when it stops clashing
+	error_state.limit = 20;
 
 	const int CODE_ERROR_LIMIT = 256;
 	struct option longopts[] = {
@@ -547,7 +597,7 @@ int format_main(int argc, char *argv[static argc]) {
 				fprintf(stderr, "Argument to --error-limit out of range\n");
 				return EX_USAGE;
 			}
-			error_limit = (u32)value;
+			error_state.limit = (u32)value;
 			break;
 		}
 		case '?': return EX_USAGE;
@@ -558,51 +608,54 @@ int format_main(int argc, char *argv[static argc]) {
 		return EX_USAGE;
 	}
 	if (optind == argc || strcmp(argv[optind], "-") == 0) {
-		file = stdin;
-		fname = "<stdin>";
+		file_stream = stdin;
+		file.name = "<stdin>";
 	} else {
-		file = nonnull_or_die(fopen(argv[optind], "r"), EX_NOINPUT);
-		fname = argv[optind];
+		file_stream = nonnull_or_die(fopen(argv[optind], "r"), EX_NOINPUT);
+		file.name = argv[optind];
 	}
 	u32 cap = 4096;
-	u32 size = 0;
-	u8 *contents = malloc(cap);
+	file.data = malloc(cap);
 	u32 lines = 0;
 	while (true) {
-		u32 wanted = cap - size;
-		usize result = fread(contents + size, 1, wanted, file);
+		u32 wanted = cap - file.len;
+		usize result = fread(file.data + file.len, 1, wanted, file_stream);
 		b32 done = false;
 		if (result != wanted) {
-			if (ferror(file)) {
+			if (ferror(file_stream)) {
 				die(EX_NOINPUT);
 			}
 			done = true;
 		}
-		for (u32 i = size; i < size + result; i++) {
-			if (contents[i] == '\n') {
+		for (u32 i = file.len; i < file.len + result; i++) {
+			if (file.data[i] == '\n') {
 				lines++;
 			}
 		}
-		size += result;
+		file.len += result;
 		if (done) {
 			break;
 		}
 		u32 newcap = cap + (cap >> 1);
 		if (newcap < cap) {
-			fprintf(stderr, "%s exceeds maximum file size of 4GB\n", fname);
+			fprintf(stderr, "%s exceeds maximum file size of 4GB\n", file.name);
 			return EX_DATAERR;
 		}
 		cap = newcap;
-		contents = realloc(contents, cap);
+		file.data = realloc(file.data, cap);
 	}
-	if (size == 0) {
+	fclose(file_stream);
+	if (file.len == 0) {
 		return 0;
 	}
-	contents = realloc(contents, size);
-	fclose(file);
+	if (file.data[file.len - 1] != '\n') {
+		lines++;
+	}
+	file.data = realloc(file.data, file.len);
+	file.lines = malloc(lines * sizeof(u8 *));
 	UTF8Errors errors = {};
-	errors.limit = error_limit;
-	contents = validate_utf8(contents, size, &errors);
+	errors.limit = error_state.limit;
+	file.data = validate_utf8(&file, &errors);
 	u32 num_errors = errors.count;
 	if (errors.limit && errors.count > errors.limit) {
 		num_errors = errors.limit;
@@ -610,7 +663,7 @@ int format_main(int argc, char *argv[static argc]) {
 	for (u32 i = 0; i < num_errors; i++) {
 		UTF8Error *error = &errors.errors[i];
 		fprintf(stderr, "%s:%d:%d: Invalid UTF-8 encoding: %s\n",
-		        fname, error->location.line, error->location.column, utf8_error_messages[error->type]);
+		        file.name, error->location.line, error->location.column, utf8_error_messages[error->type]);
 		u32 line_size = (u32)((u8 *)strchrnul((char *)error->line, '\n') - error->line);
 		u8 buf[line_size * 3];
 		u32 buf_size = 0;
@@ -635,18 +688,13 @@ int format_main(int argc, char *argv[static argc]) {
 	if (errors.count > 0) {
 		return 1;
 	}
-	if (contents[size - 1] != '\n') {
-		lines++;
-	}
 	LexerState state = {};
-	state.file = contents;
-	state.len = size;
-	state.location.file = fname;
-	state.lines = malloc(lines * sizeof(u8 *));
+	state.errors = &error_state;
+	state.file = file;
 	Token token = { .type = TOK_UNKNOWN };
 	while (token.type != TOK_EOF) {
 		next_token(&state, &token);
-		printf("%s:%u:%u: ", token.location.file, token.location.line, token.location.column);
+		printf("%s:%u:%u: ", file.name, token.location.line, token.location.column);
 		switch (token.type) {
 		case TOK_START_LETTERS: printf("START_LETTERS \"%.*s\"", token.len, token.start); break;
 		case TOK_CONTINUE_LETTERS: printf("CONTINUE_LETTERS \"%.*s\"", token.len, token.start); break;
@@ -661,35 +709,6 @@ int format_main(int argc, char *argv[static argc]) {
 		case TOK_EOF: printf("EOF"); break;
 		}
 		printf("\n");
-	}
-	for (u32 i = 0; i < state.error_count; i++) {
-		LexerError *error = &state.errors[i];
-		if (error->location_start.line == error->location_end.line) {
-			fprintf(stderr, "%s:%d:%d",
-			        error->location_start.file,
-			        error->location_start.line,
-			        error->location_start.column);
-			if (error->location_start.column != error->location_end.column) {
-				fprintf(stderr, "-%d", error->location_end.column);
-			}
-			fprintf(stderr, ": %s\n", lexer_error_messages[error->type]);
-			u8 *line = state.lines[error->location_start.line - 1];
-			u8 *end = (u8 *) strchr((char *)line, '\n');
-			fprintf(stderr, "%.*s\n", (u32) (end - line), line);
-			for (u32 j = 1; j < error->location_start.column; j++) {
-				if (line[j - 1] == '\t') {
-					fprintf(stderr, "        ");
-				} else {
-					fputc(' ', stderr);
-				}
-			}
-			for (u32 j = error->location_start.column; j <= error->location_end.column; j++) {
-				fputc('^', stderr);
-			}
-			fputc('\n', stderr);
-		} else {
-			assert("Multi line errors not yet implemented" == 0);
-		}
 	}
 	return 0;
 }
