@@ -35,12 +35,31 @@ typedef struct {
 } Token;
 
 typedef enum {
-	LEX_ERROR_EOF_IN_COMMENT,
-	LEX_ERROR_EOF_IN_STRING,
-	LEX_ERROR_UNTERMINATED_STRING,
+	ERROR_UTF8_BOM_NOT_ALLOWED,
+	ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR,
+	ERROR_UTF8_OVERLONG_SEQUENCE,
+	ERROR_UTF8_EOF_IN_SEQUENCE,
+	ERROR_UTF8_SEQUENCE_TOO_SHORT,
+	ERROR_UTF8_WRONG_SEQUENCE_LENGTH,
+	ERROR_UTF8_SURROGATES_NOT_ALLOWED,
+	ERROR_UTF8_CODE_POINT_TOO_HIGH,
+
+	ERROR_LEX_EOF_IN_COMMENT,
+	ERROR_LEX_EOF_IN_STRING,
+	ERROR_LEX_UNTERMINATED_STRING,
 } LexerErrorType;
 
-internal char *lexer_error_messages[] = {
+internal char *error_messages[] = {
+	// TODO parameterise some of these
+	"byte order markers are not permitted",
+	"unexpected continuation byte",
+	"sequence too long (> 4 bytes)",
+	"hit EOF while decoding sequence",
+	"too few continuation bytes in sequence",
+	"sequence length too long for code point",
+	"surrogates are not permitted",
+	"code point exceeded limit of 0x10ffff",
+
 	"Hit EOF while looking for end of comment",
 	"Hit EOF while looking for end of string",
 	"String was not terminated before end of line",
@@ -52,12 +71,6 @@ typedef struct {
 } Range;
 
 typedef struct {
-	LexerErrorType type;
-	Location location;
-	Range range;
-} LexerError;
-
-typedef struct {
 	char *name;
 	u8 *data;
 	u32 len;
@@ -67,23 +80,23 @@ typedef struct {
 typedef struct {
 	u32 count;
 	u32 limit;
-} ErrorState;
+} ErrorCount;
 
 typedef struct {
 	SourceFile file;
 	u32 index;
 	b32 last_not_newline;
 	Location location;
-	ErrorState *errors;
+	ErrorCount *errors;
 } LexerState;
 
 internal
-void report_error(ErrorState *state, SourceFile *file, LexerErrorType type, Location location, Range range) {
-	state->count++;
-	if (state->limit && state->count > state->limit) {
+void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Location location, Range range) {
+	errors->count++;
+	if (errors->limit && errors->count > errors->limit) {
 		return;
 	}
-	fprintf(stderr, "%s:%d:%d: %s\n", file->name, location.line, location.column, lexer_error_messages[type]);
+	fprintf(stderr, "%s:%d:%d: %s\n", file->name, location.line, location.column, error_messages[type]);
 	u8 *line = file->lines[location.line - 1];
 	u8 *end = (u8 *) strchrnul((char *)line, '\n');
 	u32 size = (u32) (end - line);
@@ -95,14 +108,27 @@ void report_error(ErrorState *state, SourceFile *file, LexerErrorType type, Loca
 			for (u32 k = 0; k < 8; k++) {
 				buf[len++] = ' ';
 			}
+		} else if (line[i] < ' ') {
+			// Map C0 control codes to control pictures
+			buf[len++] = 0xe2;
+			buf[len++] = 0x90;
+			buf[len++] = 0x80 | line[i];
+		} else if (line[i] == 0x7f) {
+			// Map DEL to its control picture
+			buf[len++] = 0xe2;
+			buf[len++] = 0x90;
+			buf[len++] = 0xa1;
 		} else {
 			buf[len++] = line[i];
 		}
 	}
 	fprintf(stderr, "%.*s\n", len, buf);
 	// TODO handle utf-8!
+	// TODO decide whether we want to assert that the range overlaps this line when it exists
 	u32 col_start = 0;
-	if (range.start.line == location.line) {
+	if (range.start.line == 0) {
+		col_start = -1u;
+	} else if (range.start.line == location.line) {
 		col_start = range.start.column - 1;
 	}
 	u32 col_end = size - 1;
@@ -319,7 +345,7 @@ void next_token(LexerState *state, Token *token) {
 			while (depth > 0) {
 				c = peek(state);
 				if (c == -1) {
-					REPORT_ERROR(LEX_ERROR_EOF_IN_COMMENT);
+					REPORT_ERROR(ERROR_LEX_EOF_IN_COMMENT);
 					break;
 				}
 				next_char(state);
@@ -369,11 +395,11 @@ void next_token(LexerState *state, Token *token) {
 		while (true) {
 			c = peek(state);
 			if (c == -1) {
-				REPORT_ERROR(LEX_ERROR_EOF_IN_STRING);
+				REPORT_ERROR(ERROR_LEX_EOF_IN_STRING);
 				break;
 			}
 			if (c == '\n') {
-				REPORT_ERROR(LEX_ERROR_UNTERMINATED_STRING);
+				REPORT_ERROR(ERROR_LEX_UNTERMINATED_STRING);
 				break;
 			}
 			advance(state);
@@ -395,68 +421,12 @@ void next_token(LexerState *state, Token *token) {
 #undef ADD_WHILE
 }
 
-typedef enum {
-	UTF8_ERROR_BOM_NOT_ALLOWED,
-	UTF8_ERROR_UNEXPECTED_CONTINUATION_CHAR,
-	UTF8_ERROR_OVERLONG_SEQUENCE,
-	UTF8_ERROR_EOF_IN_SEQUENCE,
-	UTF8_ERROR_SEQUENCE_TOO_SHORT,
-	UTF8_ERROR_WRONG_SEQUENCE_LENGTH,
-	UTF8_ERROR_SURROGATES_NOT_ALLOWED,
-	UTF8_ERROR_CODE_POINT_TOO_HIGH,
-} UTF8ErrorType;
-
 internal
-char *utf8_error_messages[] = {
-	"byte order markers are not permitted",
-	"unexpected continuation byte",
-	"sequence too long (> 4 bytes)",
-	"hit EOF while decoding sequence",
-	"too few continuation bytes in sequence",
-	"sequence length too long for code point",
-	"surrogates are not permitted",
-	"code point exceeded limit of 0x10ffff",
-};
-
-typedef struct {
-	UTF8ErrorType type;
-	Location location;
-	u8 *line;
-} UTF8Error;
-
-typedef struct UTF8Errors {
-	UTF8Error *errors;
-	u32 count;
-	u32 cap;
-	u32 limit;
-} UTF8Errors;
-
-internal
-void report_utf8_error_(UTF8Errors *errors, UTF8ErrorType type, Location location, u8 *line) {
-	if (!errors->errors) {
-		errors->cap = 8;
-		errors->errors = malloc(errors->cap * sizeof(UTF8Error));
-	}
-	if (errors->limit && errors->count >= errors->limit) {
-		errors->count++;
-		return;
-	}
-	if (errors->count == errors->cap) {
-		errors->cap += errors->cap >> 1;
-		errors->errors = realloc(errors->errors, errors->cap * sizeof(UTF8Error));
-	}
-	UTF8Error *error = &errors->errors[errors->count++];
-	error->type = type;
-	error->location = location;
-	error->line = line;
-}
-
-internal
-u8 *validate_utf8(SourceFile *file, UTF8Errors *errors) {
+u8 *validate_utf8(SourceFile *file, ErrorCount *errors) {
 	u32 index = 0;
 	b32 last_not_newline = false;
 	Location location = {};
-#define report_utf8_error(type) report_utf8_error_(errors, type, location, file->lines[location.line - 1])
+#define REPORT_ERROR(code) report_error(errors, file, code, location, (Range){})
 	while (index < file->len) {
 		if (last_not_newline) {
 			location.column++;
@@ -470,7 +440,7 @@ u8 *validate_utf8(SourceFile *file, UTF8Errors *errors) {
 			s32 c = file->data[index++];
 			last_not_newline = c != '\n';
 			if (c == 0xff) {
-				report_utf8_error(UTF8_ERROR_OVERLONG_SEQUENCE);
+				REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
 				while (index < file->len && file->data[index] >> 6 == 2) {
 					index++;
 				}
@@ -478,10 +448,10 @@ u8 *validate_utf8(SourceFile *file, UTF8Errors *errors) {
 			}
 			u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 			if (count == 1) {
-				report_utf8_error(UTF8_ERROR_UNEXPECTED_CONTINUATION_CHAR);
+				REPORT_ERROR(ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR);
 				continue;
 			} else if (count > 4) {
-				report_utf8_error(UTF8_ERROR_OVERLONG_SEQUENCE);
+				REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
 				while (index < file->len && file->data[index] >> 6 == 2) {
 					index++;
 				}
@@ -493,12 +463,12 @@ u8 *validate_utf8(SourceFile *file, UTF8Errors *errors) {
 				chars[0] >>= count;
 				for (u32 i = 1; i < count; i++) {
 					if (index == file->len) {
-						report_utf8_error(UTF8_ERROR_EOF_IN_SEQUENCE);
+						REPORT_ERROR(ERROR_UTF8_EOF_IN_SEQUENCE);
 						break;
 					}
 					chars[i] = file->data[index++];
 					if ((chars[i] >> 6) != 2) {
-						report_utf8_error(UTF8_ERROR_SEQUENCE_TOO_SHORT);
+						REPORT_ERROR(ERROR_UTF8_SEQUENCE_TOO_SHORT);
 						continue;
 					}
 					chars[i] &= 0x7f;
@@ -508,21 +478,21 @@ u8 *validate_utf8(SourceFile *file, UTF8Errors *errors) {
 					c |= chars[i] << (count - i - 1) * 6;
 				}
 				if (first_char && c == 0xfeff) {
-					report_utf8_error(UTF8_ERROR_BOM_NOT_ALLOWED);
+					REPORT_ERROR(ERROR_UTF8_BOM_NOT_ALLOWED);
 					continue;
 				}
 				if (c <= 0x7f ||
 				    count > 2 && c <= 0x7ff ||
 				    count > 3 && c <= 0xffff) {
-					report_utf8_error(UTF8_ERROR_WRONG_SEQUENCE_LENGTH);
+					REPORT_ERROR(ERROR_UTF8_WRONG_SEQUENCE_LENGTH);
 					continue;
 				}
 				if (c >= 0xd800 && c <= 0xdfff) {
-					report_utf8_error(UTF8_ERROR_SURROGATES_NOT_ALLOWED);
+					REPORT_ERROR(ERROR_UTF8_SURROGATES_NOT_ALLOWED);
 					continue;
 				}
 				if (c > 0x10ffff) {
-					report_utf8_error(UTF8_ERROR_CODE_POINT_TOO_HIGH);
+					REPORT_ERROR(ERROR_UTF8_CODE_POINT_TOO_HIGH);
 					continue;
 				}
 			}
@@ -568,8 +538,8 @@ internal
 int format_main(int argc, char *argv[static argc]) {
 	FILE *file_stream;
 	SourceFile file = {};
-	ErrorState error_state = {}; // TODO rename when it stops clashing
-	error_state.limit = 20;
+	ErrorCount errors = {};
+	errors.limit = 20;
 
 	const int CODE_ERROR_LIMIT = 256;
 	struct option longopts[] = {
@@ -597,7 +567,7 @@ int format_main(int argc, char *argv[static argc]) {
 				fprintf(stderr, "Argument to --error-limit out of range\n");
 				return EX_USAGE;
 			}
-			error_state.limit = (u32)value;
+			errors.limit = (u32)value;
 			break;
 		}
 		case '?': return EX_USAGE;
@@ -653,43 +623,12 @@ int format_main(int argc, char *argv[static argc]) {
 	}
 	file.data = realloc(file.data, file.len);
 	file.lines = malloc(lines * sizeof(u8 *));
-	UTF8Errors errors = {};
-	errors.limit = error_state.limit;
 	file.data = validate_utf8(&file, &errors);
-	u32 num_errors = errors.count;
-	if (errors.limit && errors.count > errors.limit) {
-		num_errors = errors.limit;
-	}
-	for (u32 i = 0; i < num_errors; i++) {
-		UTF8Error *error = &errors.errors[i];
-		fprintf(stderr, "%s:%d:%d: Invalid UTF-8 encoding: %s\n",
-		        file.name, error->location.line, error->location.column, utf8_error_messages[error->type]);
-		u32 line_size = (u32)((u8 *)strchrnul((char *)error->line, '\n') - error->line);
-		u8 buf[line_size * 3];
-		u32 buf_size = 0;
-		for (u32 j = 0; j < line_size; j++) {
-			u8 c = error->line[j];
-			if (c < ' ' && c != '\t' || c == 0x7f) {
-				// Map control codes to control pictures
-				buf[buf_size++] = 0xe2;
-				buf[buf_size++] = 0x90;
-				buf[buf_size++] = 0x80 | c;
-			} else {
-				buf[buf_size++] = c;
-			}
-		}
-		fprintf(stderr, "%.*s\n", buf_size, buf);
-	}
-	if (num_errors == errors.count) {
-		fprintf(stderr, "%u errors\n", num_errors);
-	} else {
-		fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
-	}
 	if (errors.count > 0) {
-		return 1;
+		goto exit_errors;
 	}
 	LexerState state = {};
-	state.errors = &error_state;
+	state.errors = &errors;
 	state.file = file;
 	Token token = { .type = TOK_UNKNOWN };
 	while (token.type != TOK_EOF) {
@@ -711,6 +650,13 @@ int format_main(int argc, char *argv[static argc]) {
 		printf("\n");
 	}
 	return 0;
+exit_errors:
+	if (!errors.limit || errors.count <= errors.limit) {
+		fprintf(stderr, "%u errors\n", errors.count);
+	} else {
+		fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
+	}
+	return 1;
 }
 
 typedef struct {
