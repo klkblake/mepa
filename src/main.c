@@ -124,7 +124,9 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 	}
 	fprintf(stderr, "%.*s\n", len, buf);
 	// TODO handle utf-8!
-	// TODO decide whether we want to assert that the range overlaps this line when it exists
+	assert(location.line || !range.start.line && !range.end.line);
+	assert(!range.start.line || range.start.line <= location.line);
+	assert(!range.end.line || range.end.line >= location.line);
 	u32 col_start = 0;
 	if (range.start.line == 0) {
 		col_start = -1u;
