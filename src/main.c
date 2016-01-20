@@ -98,12 +98,13 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 	}
 	fprintf(stderr, "%s:%d:%d: %s\n", file->name, location.line, location.column, error_messages[type]);
 	u8 *line = file->lines[location.line - 1];
-	u8 *end = (u8 *) strchrnul((char *)line, '\n');
+	u8 *end = (u8 *) strchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
 	// TODO should we trust this to not overflow the stack?
 	u8 buf[size * 8];
 	u32 len = 0;
 	for (u32 i = 0; i < size; i++) {
+		// TODO Map C1 codes (code points 0x80-0x9f, utf-8 0xc2 0x80 to 0xc2 9f) to the replacement character
 		if (line[i] == '\t') {
 			for (u32 k = 0; k < 8; k++) {
 				buf[len++] = ' ';
@@ -621,9 +622,12 @@ int format_main(int argc, char *argv[static argc]) {
 		return 0;
 	}
 	if (file.data[file.len - 1] != '\n') {
+		file.data = realloc(file.data, file.len + 1);
+		file.data[file.len++] = '\n';
 		lines++;
+	} else {
+		file.data = realloc(file.data, file.len);
 	}
-	file.data = realloc(file.data, file.len);
 	file.lines = malloc(lines * sizeof(u8 *));
 	file.data = validate_utf8(&file, &errors);
 	if (errors.count > 0) {
