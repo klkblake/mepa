@@ -317,6 +317,7 @@ void next_token(LexerState *state, Token *token) {
 	if (c == '\n') {
 		token->type = TOK_NEWLINE;
 		ADD_WHILE(c == '\t');
+		ADD_WHILE(c == ' ');
 		token->location = state->location;
 		if (token->len > 1) {
 			token->location.column = 1;
@@ -409,6 +410,31 @@ void next_token(LexerState *state, Token *token) {
 	token->type = TOK_UNKNOWN;
 #undef REPORT_ERROR
 #undef ADD_WHILE
+}
+
+internal
+u32 newline_indent(Token *newline) {
+	assert(newline->type == TOK_NEWLINE);
+	u32 i = 1;
+	u32 indent = 0;
+	while (i < newline->len) {
+		if (newline->start[i++] != '\t') {
+			break;
+		}
+		indent++;
+	}
+	return indent;
+}
+
+internal
+u32 newline_align(Token *newline) {
+	assert(newline->type == TOK_NEWLINE);
+	for (u32 i = 1; i < newline->len; i++) {
+		if (newline->start[i] != '\t') {
+			return newline->len - i;
+		}
+	}
+	return 0;
 }
 
 internal
@@ -632,7 +658,8 @@ int format_main(int argc, char *argv[static argc]) {
 		case TOK_SYMBOL: printf("SYMBOL '%.*s'", token.len, token.start); break;
 		case TOK_BRACKET: printf("BRACKET '%.*s'", token.len, token.start); break;
 		case TOK_STRING: printf("STRING \"%.*s\"", token.len, token.start); break;
-		case TOK_NEWLINE: printf("NEWLINE indent=%u", token.len - 1); break;
+		case TOK_NEWLINE: printf("NEWLINE indent=%u, align=%u",
+		                         newline_indent(&token), newline_align(&token)); break;
 		case TOK_SPACES: printf("SPACES \"%.*s\"", token.len, token.start); break;
 		case TOK_COMMENT: printf("COMMENT \"%.*s\"", token.len, token.start); break;
 		case TOK_UNKNOWN: printf("UNKNOWN \"%.*s\"", token.len, token.start); break;
