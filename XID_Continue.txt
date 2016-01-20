@@ -1,5 +1,5 @@
 # The following file is from unicode version 8.0.0. It had been modified to
-# remove the backwards compatibility characters, ASCII digits, and underscore.
+# remove the backwards compatibility characters.
 
 # Derived Property: XID_Continue
 #  Mod_ID_Continue modified for closure under NFKx
@@ -8,7 +8,9 @@
 #        Merely ensures that if isIdentifer(string) then isIdentifier(NFKx(string))
 #  NOTE: See UAX #31 for more information
 
+0030..0039    ; XID_Continue # Nd  [10] DIGIT ZERO..DIGIT NINE
 0041..005A    ; XID_Continue # L&  [26] LATIN CAPITAL LETTER A..LATIN CAPITAL LETTER Z
+005F          ; XID_Continue # Pc       LOW LINE
 0061..007A    ; XID_Continue # L&  [26] LATIN SMALL LETTER A..LATIN SMALL LETTER Z
 00AA          ; XID_Continue # Lo       FEMININE ORDINAL INDICATOR
 00B5          ; XID_Continue # L&       MICRO SIGN

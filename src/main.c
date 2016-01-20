@@ -13,9 +13,7 @@ typedef struct {
 } Location;
 
 typedef enum {
-	TOK_START_LETTERS,
-	TOK_CONTINUE_LETTERS,
-	TOK_DIGITS,
+	TOK_WORD,
 	TOK_SYMBOL,
 	TOK_BRACKET,
 	TOK_STRING,
@@ -31,7 +29,6 @@ typedef struct {
 	Location location;
 	u8 *start;
 	u32 len;
-	char *str;
 } Token;
 
 typedef enum {
@@ -105,6 +102,7 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 	u32 len = 0;
 	for (u32 i = 0; i < size; i++) {
 		// TODO Map C1 codes (code points 0x80-0x9f, utf-8 0xc2 0x80 to 0xc2 9f) to the replacement character
+		// TODO sanitise against malformed UTF-8
 		if (line[i] == '\t') {
 			for (u32 k = 0; k < 8; k++) {
 				buf[len++] = ' ';
@@ -286,7 +284,6 @@ b32 is_symbol(s32 c) {
 	        c == '@' ||
 	        c == '\\' ||
 	        c == '^' ||
-	        c == '_' ||
 	        c == '`' ||
 	        c == '|' ||
 	        c == '~');
@@ -370,11 +367,6 @@ void next_token(LexerState *state, Token *token) {
 			return;
 		}
 	}
-	if ('0' <= c && c <= '9') {
-		token->type = TOK_DIGITS;
-		ADD_WHILE('0' <= c && c <= '9');
-		return;
-	}
 	if (is_symbol(c)) {
 		token->type = TOK_SYMBOL;
 		return;
@@ -384,13 +376,8 @@ void next_token(LexerState *state, Token *token) {
 		return;
 	}
 	if (is_start_letter(c)) {
-		token->type = TOK_START_LETTERS;
-		ADD_WHILE(is_start_letter(c));
-		return;
-	}
-	if (is_continue_letter(c)) {
-		token->type = TOK_CONTINUE_LETTERS;
-		ADD_WHILE(!is_start_letter(c) && is_continue_letter(c));
+		token->type = TOK_WORD;
+		ADD_WHILE(is_continue_letter(c));
 		return;
 	}
 	if (c == '"') {
@@ -641,9 +628,7 @@ int format_main(int argc, char *argv[static argc]) {
 		next_token(&state, &token);
 		printf("%s:%u:%u: ", file.name, token.location.line, token.location.column);
 		switch (token.type) {
-		case TOK_START_LETTERS: printf("START_LETTERS \"%.*s\"", token.len, token.start); break;
-		case TOK_CONTINUE_LETTERS: printf("CONTINUE_LETTERS \"%.*s\"", token.len, token.start); break;
-		case TOK_DIGITS: printf("DIGITS \"%.*s\"", token.len, token.start); break;
+		case TOK_WORD: printf("WORD \"%.*s\"", token.len, token.start); break;
 		case TOK_SYMBOL: printf("SYMBOL '%.*s'", token.len, token.start); break;
 		case TOK_BRACKET: printf("BRACKET '%.*s'", token.len, token.start); break;
 		case TOK_STRING: printf("STRING \"%.*s\"", token.len, token.start); break;
