@@ -123,6 +123,7 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 	}
 	fprintf(stderr, "%.*s\n", len, buf);
 	// TODO handle utf-8!
+	// TODO handle invalid utf-8 iff we are reporting a UTF-8 error
 	assert(location.line || !range.start.line && !range.end.line);
 	assert(!range.start.line || range.start.line <= location.line);
 	assert(!range.end.line || range.end.line >= location.line);
@@ -438,84 +439,102 @@ u32 newline_align(Token *newline) {
 }
 
 internal
-u8 *validate_utf8(SourceFile *file, ErrorCount *errors) {
+SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
+	Location location = {};
+	SourceFile vfile = {
+		file.name,
+		malloc(file.len),
+		0,
+		malloc(lines * sizeof(u32)),
+	};
 	u32 index = 0;
 	b32 last_not_newline = false;
-	Location location = {};
-#define REPORT_ERROR(code) report_error(errors, file, code, location, (Range){})
-	while (index < file->len) {
+	b32 first_char = true;
+#define REPORT_ERROR(code) report_error(errors, &file, code, location, (Range){})
+	while (index < file.len) {
 		if (last_not_newline) {
 			location.column++;
 		} else {
 			location.line++;
 			location.column = 1;
-			file->lines[location.line - 1] = file->data + index;
+			file.lines[location.line - 1] = file.data + index;
+			vfile.lines[location.line - 1] = vfile.data + vfile.len;
 		}
-		while (index < file->len) {
-			b32 first_char = index == 0;
-			s32 c = file->data[index++];
-			last_not_newline = c != '\n';
-			if (c == 0xff) {
-				REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
-				while (index < file->len && file->data[index] >> 6 == 2) {
-					index++;
-				}
-				continue;
-			}
-			u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
-			if (count == 1) {
-				REPORT_ERROR(ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR);
-				continue;
-			} else if (count > 4) {
-				REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
-				while (index < file->len && file->data[index] >> 6 == 2) {
-					index++;
-				}
-				continue;
-			} else if (count != 0) {
-				u8 chars[count];
-				chars[0] = (u8)c;
-				chars[0] <<= count;
-				chars[0] >>= count;
-				for (u32 i = 1; i < count; i++) {
-					if (index == file->len) {
-						REPORT_ERROR(ERROR_UTF8_EOF_IN_SEQUENCE);
-						break;
-					}
-					chars[i] = file->data[index++];
-					if ((chars[i] >> 6) != 2) {
-						REPORT_ERROR(ERROR_UTF8_SEQUENCE_TOO_SHORT);
-						continue;
-					}
-					chars[i] &= 0x7f;
-				}
-				c = chars[0] << (count - 1) * 6;
-				for (u32 i = 1; i < count; i++) {
-					c |= chars[i] << (count - i - 1) * 6;
-				}
-				if (first_char && c == 0xfeff) {
-					REPORT_ERROR(ERROR_UTF8_BOM_NOT_ALLOWED);
-					continue;
-				}
-				if (c <= 0x7f ||
-				    count > 2 && c <= 0x7ff ||
-				    count > 3 && c <= 0xffff) {
-					REPORT_ERROR(ERROR_UTF8_WRONG_SEQUENCE_LENGTH);
-					continue;
-				}
-				if (c >= 0xd800 && c <= 0xdfff) {
-					REPORT_ERROR(ERROR_UTF8_SURROGATES_NOT_ALLOWED);
-					continue;
-				}
-				if (c > 0x10ffff) {
-					REPORT_ERROR(ERROR_UTF8_CODE_POINT_TOO_HIGH);
-					continue;
-				}
-			}
+retry:
+		if (index >= file.len) {
 			break;
 		}
+		u32 c = file.data[index++];
+		last_not_newline = c != '\n';
+		if (c == 0xff) {
+			REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
+			while (index < file.len && file.data[index] >> 6 == 2) {
+				index++;
+			}
+			goto retry;
+		}
+		u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
+		if (count == 1) {
+			REPORT_ERROR(ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR);
+			goto retry;
+		} else if (count > 4) {
+			REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
+			while (index < file.len && file.data[index] >> 6 == 2) {
+				index++;
+			}
+			goto retry;
+		} else if (count == 0) {
+			vfile.data[vfile.len++] = (u8)c;
+		} else {
+			u8 chars[count];
+			chars[0] = (u8)c;
+			chars[0] <<= count;
+			chars[0] >>= count;
+			for (u32 i = 1; i < count; i++) {
+				if (index == file.len) {
+					REPORT_ERROR(ERROR_UTF8_EOF_IN_SEQUENCE);
+					goto retry;
+				}
+				chars[i] = file.data[index];
+				if ((chars[i] >> 6) != 2) {
+					REPORT_ERROR(ERROR_UTF8_SEQUENCE_TOO_SHORT);
+					goto retry;
+				}
+				chars[i] &= 0x7f;
+				index++;
+			}
+			c = (u32)chars[0] << (count - 1) * 6;
+			for (u32 i = 1; i < count; i++) {
+				c |= (u32)chars[i] << (count - i - 1) * 6;
+			}
+			if (first_char && c == 0xfeff) {
+				REPORT_ERROR(ERROR_UTF8_BOM_NOT_ALLOWED);
+				goto retry;
+			}
+			if (c <= 0x7f ||
+			    count > 2 && c <= 0x7ff ||
+			    count > 3 && c <= 0xffff) {
+				REPORT_ERROR(ERROR_UTF8_WRONG_SEQUENCE_LENGTH);
+				goto retry;
+			}
+			if (c >= 0xd800 && c <= 0xdfff) {
+				REPORT_ERROR(ERROR_UTF8_SURROGATES_NOT_ALLOWED);
+				goto retry;
+			}
+			if (c > 0x10ffff) {
+				REPORT_ERROR(ERROR_UTF8_CODE_POINT_TOO_HIGH);
+				goto retry;
+			}
+			for (u32 i = 0; i < count; i++) {
+				vfile.data[vfile.len++] = file.data[index - count + i];
+			}
+		}
+		first_char = false;
 	}
-	return file->data;
+	free(file.data);
+	free(file.lines);
+	vfile.data = realloc(vfile.data, vfile.len);
+	return vfile;
 }
 
 internal
@@ -642,10 +661,7 @@ int format_main(int argc, char *argv[static argc]) {
 		file.data = realloc(file.data, file.len);
 	}
 	file.lines = malloc(lines * sizeof(u8 *));
-	file.data = validate_utf8(&file, &errors);
-	if (errors.count > 0) {
-		goto exit_errors;
-	}
+	file = validate_utf8(file, lines, &errors);
 	LexerState state = {};
 	state.errors = &errors;
 	state.file = file;
@@ -667,14 +683,15 @@ int format_main(int argc, char *argv[static argc]) {
 		}
 		printf("\n");
 	}
-	return 0;
-exit_errors:
-	if (!errors.limit || errors.count <= errors.limit) {
-		fprintf(stderr, "%u errors\n", errors.count);
-	} else {
-		fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
+	if (errors.count > 0) {
+		if (!errors.limit || errors.count <= errors.limit) {
+			fprintf(stderr, "%u errors\n", errors.count);
+		} else {
+			fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
+		}
+		return 1;
 	}
-	return 1;
+	return 0;
 }
 
 typedef struct {
