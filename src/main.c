@@ -83,6 +83,7 @@ typedef struct {
 	SourceFile file;
 	u32 index;
 	b32 last_not_newline;
+	b32 last_not_tab;
 	Location location;
 	ErrorCount *errors;
 } LexerState;
@@ -99,6 +100,7 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 	u32 size = (u32) (end - line);
 	// TODO should we trust this to not overflow the stack?
 	u8 buf[size * 8];
+	u32 num_cols = 0;
 	u32 len = 0;
 	for (u32 i = 0; i < size; i++) {
 		// TODO Map C1 codes (code points 0x80-0x9f, utf-8 0xc2 0x80 to 0xc2 9f) to the replacement character
@@ -107,6 +109,7 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 			for (u32 k = 0; k < 8; k++) {
 				buf[len++] = ' ';
 			}
+			num_cols += 7;
 		} else if (line[i] < ' ') {
 			// Map C0 control codes to control pictures
 			buf[len++] = 0xe2;
@@ -120,6 +123,7 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 		} else {
 			buf[len++] = line[i];
 		}
+		num_cols++;
 	}
 	fprintf(stderr, "%.*s\n", len, buf);
 	// TODO handle utf-8!
@@ -133,16 +137,16 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 	} else if (range.start.line == location.line) {
 		col_start = range.start.column - 1;
 	}
-	u32 col_end = size - 1;
+	u32 col_end = num_cols - 1;
 	if (range.end.line == location.line) {
 		col_end = range.end.column - 1;
 	}
 	len = 0;
-	for (u32 i = 0; i < size; i++) {
+	for (u32 i = 0, col = 0; i < size; i++) {
 		u8 c;
-		if (i == location.column - 1) {
+		if (col == location.column - 1) {
 			c = '^';
-		} else if (col_start <= i && i <= col_end) {
+		} else if (col_start <= col && col <= col_end) {
 			c = '~';
 		} else {
 			c = ' ';
@@ -151,8 +155,10 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 			for (u32 k = 0; k < 8; k++) {
 				buf[len++] = c;
 			}
+			col += 8;
 		} else {
 			buf[len++] = c;
+			col++;
 		}
 	}
 	fprintf(stderr, "%.*s\n", len, buf);
@@ -178,7 +184,9 @@ s32 peek(LexerState *state) {
 
 internal
 void advance(LexerState *state) {
-	if (state->last_not_newline) {
+	if (!state->last_not_tab) {
+		state->location.column += 8;
+	} else if (state->last_not_newline) {
 		state->location.column++;
 	} else {
 		state->location.line++;
@@ -187,6 +195,7 @@ void advance(LexerState *state) {
 	if (state->index < state->file.len) {
 		s32 c = state->file.data[state->index++];
 		state->last_not_newline = c != '\n';
+		state->last_not_tab = c != '\t';
 		u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 		if (seq_len > 0) {
 			state->index += seq_len - 1;
@@ -449,10 +458,13 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 	};
 	u32 index = 0;
 	b32 last_not_newline = false;
+	b32 last_not_tab = false;
 	b32 first_char = true;
 #define REPORT_ERROR(code) report_error(errors, &file, code, location, (Range){})
 	while (index < file.len) {
-		if (last_not_newline) {
+		if (!last_not_tab) {
+			location.column += 8;
+		} else if (last_not_newline) {
 			location.column++;
 		} else {
 			location.line++;
@@ -466,6 +478,7 @@ retry:
 		}
 		u32 c = file.data[index++];
 		last_not_newline = c != '\n';
+		last_not_tab = c != '\t';
 		if (c == 0xff) {
 			REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
 			while (index < file.len && file.data[index] >> 6 == 2) {
