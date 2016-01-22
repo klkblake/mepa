@@ -655,8 +655,9 @@ int format_main(int argc, char *argv[static argc]) {
 			break;
 		}
 		u32 newcap = cap + (cap >> 1);
-		if (newcap < cap) {
-			fprintf(stderr, "%s exceeds maximum file size of 4GB\n", file.name);
+		// Ensure that we fit within a u32 even if we need to add a final newline
+		if (newcap < cap || newcap == -1u) {
+			fprintf(stderr, "%s exceeds maximum file size of 4GB - 1\n", file.name);
 			return EX_DATAERR;
 		}
 		cap = newcap;
