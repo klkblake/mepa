@@ -2,6 +2,7 @@
 set -e
 
 DEBUG=no
+STATIC="-static"
 
 CC=${CC:-clang}
 
@@ -12,6 +13,7 @@ if [[ "$1" == debug ]]; then
 		CFLAGS="-fsanitize=undefined $CFLAGS"
 	elif [[ "$2" == address ]]; then
 		CFLAGS="-fsanitize=address -fsanitize=leak $CFLAGS"
+		STATIC=""
 	elif [[ "$2" == memory ]]; then
 		CFLAGS="-fsanitize=memory $CFLAGS"
 	fi
@@ -26,4 +28,4 @@ CFLAGS="-Wall -Weverything -Wno-gnu-folding-constant -Wno-gnu-empty-initializer 
 CFLAGS="-std=gnu11 -x c $CFLAGS"
 
 ./gen_unicode_tables
-$CC -static $CFLAGS -o mepa src/main.c
+$CC $STATIC $CFLAGS -o mepa src/main.c
