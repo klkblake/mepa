@@ -71,7 +71,7 @@ typedef struct {
 	char *name;
 	u8 *data;
 	u32 len;
-	u8 **lines;
+	u32 *lines;
 } SourceFile;
 
 typedef struct {
@@ -95,7 +95,7 @@ void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Loc
 		return;
 	}
 	fprintf(stderr, "%s:%d:%d: %s\n", file->name, location.line, location.column, error_messages[type]);
-	u8 *line = file->lines[location.line - 1];
+	u8 *line = file->data + file->lines[location.line - 1];
 	u8 *end = (u8 *) strchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
 	// TODO should we trust this to not overflow the stack?
@@ -469,8 +469,8 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 		} else {
 			location.line++;
 			location.column = 1;
-			file.lines[location.line - 1] = file.data + index;
-			vfile.lines[location.line - 1] = vfile.data + vfile.len;
+			file.lines[location.line - 1] = index;
+			vfile.lines[location.line - 1] = vfile.len;
 		}
 retry:
 		if (index >= file.len) {
@@ -673,7 +673,7 @@ int format_main(int argc, char *argv[static argc]) {
 	} else {
 		file.data = realloc(file.data, file.len);
 	}
-	file.lines = malloc(lines * sizeof(u8 *));
+	file.lines = malloc(lines * sizeof(u32));
 	file = validate_utf8(file, lines, &errors);
 	LexerState state = {};
 	state.errors = &errors;
