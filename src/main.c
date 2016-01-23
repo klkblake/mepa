@@ -46,8 +46,10 @@ typedef enum {
 	ERROR_LEX_UNTERMINATED_STRING,
 
 	ERROR_SYN_EXPECTED,
-	NOTE_SYN_TO_MATCH,
 	ERROR_SYN_EXTRA_CLOSING_BRACKET,
+	ERROR_END,
+
+	NOTE_SYN_TO_MATCH,
 } ErrorCode;
 
 internal char *error_messages[] = {
@@ -61,13 +63,15 @@ internal char *error_messages[] = {
 	"surrogates are not permitted",
 	"code point exceeded limit of 0x10ffff",
 
-	"Hit EOF while looking for end of comment",
-	"Hit EOF while looking for end of string",
-	"String was not terminated before end of line",
+	"hit EOF while looking for end of comment",
+	"hit EOF while looking for end of string",
+	"string was not terminated before end of line",
 
-	"Expected closing bracket",
-	"To match this",
-	"Extraneous closing bracket",
+	"expected closing bracket",
+	"extraneous closing bracket",
+	NULL,
+
+	"to match this",
 };
 
 typedef struct {
@@ -97,12 +101,19 @@ typedef struct {
 } LexerState;
 
 internal
-void report_error(ErrorCount *errors, SourceFile *file, ErrorCode type, Location location, Range range) {
+void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location location, Range range) {
 	errors->count++;
 	if (errors->limit && errors->count > errors->limit) {
 		return;
 	}
-	fprintf(stderr, "%s:%d:%d: %s\n", file->name, location.line, location.column, error_messages[type]);
+	char *severity;
+	if (code < ERROR_END) {
+		severity = "error";
+	} else {
+		severity = "note";
+	}
+	fprintf(stderr, "%s:%d:%d: %s: %s\n",
+	        file->name, location.line, location.column, severity, error_messages[code]);
 	u8 *line = file->data + file->lines[location.line - 1];
 	u8 *end = (u8 *) strchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
