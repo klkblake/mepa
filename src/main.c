@@ -67,11 +67,11 @@ internal char *error_messages[] = {
 	"hit EOF while looking for end of string",
 	"string was not terminated before end of line",
 
-	"expected closing bracket",
+	"expected closing '%0'",
 	"extraneous closing bracket",
 	NULL,
 
-	"to match this",
+	"to match this '%0'",
 };
 
 typedef struct {
@@ -101,18 +101,19 @@ typedef struct {
 } LexerState;
 
 internal
-void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location location, Range range) {
+void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location location, Range range, ...) {
 	errors->count++;
 	if (errors->limit && errors->count > errors->limit) {
 		return;
 	}
 	// TODO only use control codes if output is terminal
-	char *red = "\x1b[1;31m";
-	char *white = "\x1b[1;37m";
-	char *green = "\x1b[1;32m";
-	char *grey = "\x1b[1;30m";
-	char *magenta = "\x1b[1;35m"; // XXX for warnings, when they are added
-	char *reset = "\x1b[0m";
+	// TODO sort out columns vs characters vs bytes in this function
+	char red[] = "\x1b[1;31m";
+	char white[] = "\x1b[1;37m";
+	char green[] = "\x1b[1;32m";
+	char grey[] = "\x1b[1;30m";
+	char magenta[] = "\x1b[1;35m"; // XXX for warnings, when they are added
+	char reset[] = "\x1b[0m";
 	char *severity;
 	char *severity_color;
 	if (code < ERROR_END) {
@@ -122,16 +123,73 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 		severity = "note";
 		severity_color = grey;
 	}
-	fprintf(stderr, "%s%s:%d:%d: %s%s:%s %s%s\n",
-	        white, file->name, location.line, location.column,
-	        severity_color, severity, white, error_messages[code], reset);
 	u8 *line = file->data + file->lines[location.line - 1];
 	u8 *end = (u8 *) strchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
-	// TODO should we trust this to not overflow the stack?
-	u8 buf[size * 8];
-	u32 num_cols = 0;
+	// Make sure the initial size is large enough that we don't have to
+	// grow it when printing the source or carat lines
+	u32 cap = size * 8;
+	u8 *buf = malloc(cap);
 	u32 len = 0;
+#define APPEND_(str, size) \
+	while (len + (size) > cap) { \
+		cap += cap >> 1; \
+		buf = realloc(buf, cap); \
+	} \
+	memcpy(buf + len, str, size); \
+	len += size
+#define APP_CONST(str) do { APPEND_(str, sizeof(str) - 1); } while (false)
+#define APP_SZ(str, size) do { APPEND_(str, size); } while (false)
+	if (code < ERROR_END) {
+		APP_CONST(red);
+		APP_CONST("error: ");
+	} else {
+		APP_CONST(grey);
+		APP_CONST("note: ");
+	}
+	APP_CONST(white);
+	char *message = error_messages[code];
+	u32 message_len = (u32)strlen(message);
+	u32 argc = 0;
+	for (u32 i = 0; i < message_len; i++) {
+		if (message[i] == '%') {
+			argc++;
+		}
+	}
+	char *argv[argc];
+	if (argc) {
+		va_list list;
+		va_start(list, range);
+		for (u32 i = 0; i < argc; i++) {
+			argv[i] = va_arg(list, char *);
+		}
+		va_end(list);
+	}
+	char *message_end = message + message_len;
+	while (message < message_end) {
+		char *next_spec = strchr(message, '%');
+		if (next_spec == NULL) {
+			APP_SZ(message, (u32)(message_end - message));
+			break;
+		}
+		APP_SZ(message, (u32)(next_spec - message));
+		message = next_spec;
+		assert(message + 1 < message_end);
+		u8 c = (u8)message[1];
+		assert('0' <= c && c <= '0');
+		c -= '0';
+		u32 arg_len = (u32)strlen(argv[c]);
+		APP_SZ(argv[c], arg_len);
+		message += 2;
+	}
+	APP_CONST(reset);
+	fprintf(stderr, "%s%s:%d:%d: %.*s\n", white, file->name, location.line, location.column, len, buf);
+#undef APP_SZ
+#undef APP_CONST
+#undef APPEND_
+	// TODO should we trust this to not overflow the stack?
+	u32 num_cols = 0;
+	len = 0;
 	for (u32 i = 0; i < size; i++) {
 		// TODO Map C1 codes (code points 0x80-0x9f, utf-8 0xc2 0x80 to 0xc2 9f) to the replacement character
 		// TODO sanitise against malformed UTF-8
@@ -713,7 +771,7 @@ int format_main(int argc, char *argv[static argc]) {
 	typedef struct {
 		u32 indent;
 		u32 align;
-		u8 c;
+		u8 type;
 		Location location;
 	} Indent;
 	struct {
@@ -728,7 +786,7 @@ int format_main(int argc, char *argv[static argc]) {
 	Token token = { .type = TOK_UNKNOWN };
 	Token peek_token;
 	next_token(&state, &token);
-#define REPORT_ERROR(code, location) report_error(&errors, &file, code, location, (Range){})
+#define REPORT_ERROR(code, location, ...) report_error(&errors, &file, code, location, (Range){}, ##__VA_ARGS__)
 	while (token.type != TOK_EOF) {
 		next_token(&state, &peek_token);
 		printf("%s:%u:%u: ", file.name, token.location.line, token.location.column);
@@ -738,7 +796,14 @@ int format_main(int argc, char *argv[static argc]) {
 		case TOK_BRACKET:
 		{
 			u8 c = *token.start;
-			if (c == '{' || c == '(' || c == '[') {
+			// Map to a dense range
+			// '(', ')' => 0
+			// '[', ']' => 1
+			// '{', '}' => 2
+			u8 type = (c >> 5) - 1;
+			u8 open[]  = { '(', '[', '{' };
+			u8 close[] = { ')', ']', '}' };
+			if (c == open[type]) {
 				if (indent_stack.len == indent_stack.cap) {
 					indent_stack.cap += indent_stack.cap >> 1;
 					indent_stack.data = realloc(indent_stack.data,
@@ -747,13 +812,7 @@ int format_main(int argc, char *argv[static argc]) {
 				Indent *old = &indent_stack.data[indent_stack.len - 1];
 				Indent *new = &indent_stack.data[indent_stack.len++];
 				new->location = token.location;
-				if (c == '{') {
-					new->c = '}';
-				} else if (c == '(') {
-					new->c = ')';
-				} else {
-					new->c = ']';
-				}
+				new->type = type;
 				if (c == '{') {
 					new->indent = old->indent + 1;
 					new->align = 0;
@@ -766,7 +825,7 @@ int format_main(int argc, char *argv[static argc]) {
 				       token.len, token.start, new->indent, new->align);
 			} else {
 				u32 match = indent_stack.len - 1;
-				while (match > 0 && indent_stack.data[match].c != c) {
+				while (match > 0 && indent_stack.data[match].type != type) {
 					match--;
 				}
 				if (indent_stack.len == 1) {
@@ -774,9 +833,12 @@ int format_main(int argc, char *argv[static argc]) {
 				} else if (match == 0) {
 					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
 				} else if (match < indent_stack.len - 1) {
-					REPORT_ERROR(ERROR_SYN_EXPECTED, token.location);
+					u8 wanted = indent_stack.data[indent_stack.len - 1].type;
+					u8 open_str[2] = { open[wanted], 0 };
+					u8 close_str[2] = { close[wanted], 0 };
+					REPORT_ERROR(ERROR_SYN_EXPECTED, token.location, close_str);
 					REPORT_ERROR(NOTE_SYN_TO_MATCH,
-					             indent_stack.data[indent_stack.len - 1].location);
+					             indent_stack.data[indent_stack.len - 1].location, open_str);
 					indent_stack.len = match + 1;
 				} else {
 					indent_stack.len--;
