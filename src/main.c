@@ -106,14 +106,25 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 	if (errors->limit && errors->count > errors->limit) {
 		return;
 	}
+	// TODO only use control codes if output is terminal
+	char *red = "\x1b[1;31m";
+	char *white = "\x1b[1;37m";
+	char *green = "\x1b[1;32m";
+	char *grey = "\x1b[1;30m";
+	char *magenta = "\x1b[1;35m"; // XXX for warnings, when they are added
+	char *reset = "\x1b[0m";
 	char *severity;
+	char *severity_color;
 	if (code < ERROR_END) {
 		severity = "error";
+		severity_color = red;
 	} else {
 		severity = "note";
+		severity_color = grey;
 	}
-	fprintf(stderr, "%s:%d:%d: %s: %s\n",
-	        file->name, location.line, location.column, severity, error_messages[code]);
+	fprintf(stderr, "%s%s:%d:%d: %s%s:%s %s%s\n",
+	        white, file->name, location.line, location.column,
+	        severity_color, severity, white, error_messages[code], reset);
 	u8 *line = file->data + file->lines[location.line - 1];
 	u8 *end = (u8 *) strchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
@@ -180,7 +191,7 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 			col++;
 		}
 	}
-	fprintf(stderr, "%.*s\n", len, buf);
+	fprintf(stderr, "%s%.*s%s\n", green, len, buf, reset);
 }
 
 internal
