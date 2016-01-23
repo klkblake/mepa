@@ -83,7 +83,7 @@ typedef struct {
 	SourceFile file;
 	u32 index;
 	b32 last_not_newline;
-	b32 last_not_tab;
+	b32 last_tab;
 	Location location;
 	ErrorCount *errors;
 } LexerState;
@@ -184,7 +184,7 @@ s32 peek(LexerState *state) {
 
 internal
 void advance(LexerState *state) {
-	if (!state->last_not_tab) {
+	if (state->last_tab) {
 		state->location.column += 8;
 	} else if (state->last_not_newline) {
 		state->location.column++;
@@ -195,7 +195,7 @@ void advance(LexerState *state) {
 	if (state->index < state->file.len) {
 		s32 c = state->file.data[state->index++];
 		state->last_not_newline = c != '\n';
-		state->last_not_tab = c != '\t';
+		state->last_tab = c == '\t';
 		u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 		if (seq_len > 0) {
 			state->index += seq_len - 1;
@@ -458,11 +458,11 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 	};
 	u32 index = 0;
 	b32 last_not_newline = false;
-	b32 last_not_tab = false;
+	b32 last_tab = false;
 	b32 first_char = true;
 #define REPORT_ERROR(code) report_error(errors, &file, code, location, (Range){})
 	while (index < file.len) {
-		if (!last_not_tab) {
+		if (last_tab) {
 			location.column += 8;
 		} else if (last_not_newline) {
 			location.column++;
@@ -478,7 +478,7 @@ retry:
 		}
 		u32 c = file.data[index++];
 		last_not_newline = c != '\n';
-		last_not_tab = c != '\t';
+		last_tab = c == '\t';
 		if (c == 0xff) {
 			REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
 			while (index < file.len && file.data[index] >> 6 == 2) {
