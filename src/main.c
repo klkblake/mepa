@@ -44,6 +44,10 @@ typedef enum {
 	ERROR_LEX_EOF_IN_COMMENT,
 	ERROR_LEX_EOF_IN_STRING,
 	ERROR_LEX_UNTERMINATED_STRING,
+
+	ERROR_SYN_EXPECTED,
+	NOTE_SYN_TO_MATCH,
+	ERROR_SYN_EXTRA_CLOSING_BRACKET,
 } LexerErrorType;
 
 internal char *error_messages[] = {
@@ -60,6 +64,10 @@ internal char *error_messages[] = {
 	"Hit EOF while looking for end of comment",
 	"Hit EOF while looking for end of string",
 	"String was not terminated before end of line",
+
+	"Expected closing bracket",
+	"To match this",
+	"Extraneous closing bracket",
 };
 
 typedef struct {
@@ -544,6 +552,7 @@ retry:
 		}
 		first_char = false;
 	}
+#undef REPORT_ERROR
 	free(file.data);
 	free(file.lines);
 	vfile.data = realloc(vfile.data, vfile.len);
@@ -679,14 +688,83 @@ int format_main(int argc, char *argv[static argc]) {
 	LexerState state = {};
 	state.errors = &errors;
 	state.file = file;
+	typedef struct {
+		u32 indent;
+		u32 align;
+		u8 c;
+		Location location;
+	} Indent;
+	struct {
+		Indent *data;
+		u32 len;
+		u32 cap;
+	} indent_stack;
+	indent_stack.cap = 8;
+	indent_stack.data = malloc(indent_stack.cap * sizeof(Indent));
+	indent_stack.len = 1;
+	indent_stack.data[0] = (Indent){};
 	Token token = { .type = TOK_UNKNOWN };
+	Token peek_token;
+	next_token(&state, &token);
+#define REPORT_ERROR(code, location) report_error(&errors, &file, code, location, (Range){})
 	while (token.type != TOK_EOF) {
-		next_token(&state, &token);
+		next_token(&state, &peek_token);
 		printf("%s:%u:%u: ", file.name, token.location.line, token.location.column);
 		switch (token.type) {
 		case TOK_WORD: printf("WORD \"%.*s\"", token.len, token.start); break;
 		case TOK_SYMBOL: printf("SYMBOL '%.*s'", token.len, token.start); break;
-		case TOK_BRACKET: printf("BRACKET '%.*s'", token.len, token.start); break;
+		case TOK_BRACKET:
+		{
+			u8 c = *token.start;
+			if (c == '{' || c == '(' || c == '[') {
+				if (indent_stack.len == indent_stack.cap) {
+					indent_stack.cap += indent_stack.cap >> 1;
+					indent_stack.data = realloc(indent_stack.data,
+					                            indent_stack.cap * sizeof(Indent));
+				}
+				Indent *old = &indent_stack.data[indent_stack.len - 1];
+				Indent *new = &indent_stack.data[indent_stack.len++];
+				new->location = token.location;
+				if (c == '{') {
+					new->c = '}';
+				} else if (c == '(') {
+					new->c = ')';
+				} else {
+					new->c = ']';
+				}
+				if (c == '{') {
+					new->indent = old->indent + 1;
+					new->align = 0;
+				} else {
+					// TODO pull out tab width into constant
+					new->indent = old->indent;
+					new->align = token.location.column - old->indent * 8;
+				}
+				printf("OPEN '%.*s' indent=%u, align=%u",
+				       token.len, token.start, new->indent, new->align);
+			} else {
+				u32 match = indent_stack.len - 1;
+				while (match > 0 && indent_stack.data[match].c != c) {
+					match--;
+				}
+				if (indent_stack.len == 1) {
+					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
+				} else if (match == 0) {
+					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
+				} else if (match < indent_stack.len - 1) {
+					REPORT_ERROR(ERROR_SYN_EXPECTED, token.location);
+					REPORT_ERROR(NOTE_SYN_TO_MATCH,
+					             indent_stack.data[match].location);
+					indent_stack.len = match + 1;
+				} else {
+					indent_stack.len--;
+				}
+				Indent *new = &indent_stack.data[indent_stack.len - 1];
+				printf("CLOSE '%.*s' indent=%u, align=%u",
+				       token.len, token.start, new->indent, new->align);
+			}
+			break;
+		}
 		case TOK_STRING: printf("STRING \"%.*s\"", token.len, token.start); break;
 		case TOK_NEWLINE: printf("NEWLINE indent=%u, align=%u",
 		                         newline_indent(&token), newline_align(&token)); break;
@@ -696,7 +774,11 @@ int format_main(int argc, char *argv[static argc]) {
 		case TOK_EOF: printf("EOF"); break;
 		}
 		printf("\n");
+		token = peek_token;
 	}
+#undef REPORT_ERROR
+	// TODO don't free memory that is about to be freed by program exit
+	free(indent_stack.data);
 	if (errors.count > 0) {
 		if (!errors.limit || errors.count <= errors.limit) {
 			fprintf(stderr, "%u errors\n", errors.count);
