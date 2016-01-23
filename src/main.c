@@ -48,7 +48,7 @@ typedef enum {
 	ERROR_SYN_EXPECTED,
 	NOTE_SYN_TO_MATCH,
 	ERROR_SYN_EXTRA_CLOSING_BRACKET,
-} LexerErrorType;
+} ErrorCode;
 
 internal char *error_messages[] = {
 	// TODO parameterise some of these
@@ -97,7 +97,7 @@ typedef struct {
 } LexerState;
 
 internal
-void report_error(ErrorCount *errors, SourceFile *file, LexerErrorType type, Location location, Range range) {
+void report_error(ErrorCount *errors, SourceFile *file, ErrorCode type, Location location, Range range) {
 	errors->count++;
 	if (errors->limit && errors->count > errors->limit) {
 		return;
