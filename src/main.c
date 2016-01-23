@@ -776,7 +776,7 @@ int format_main(int argc, char *argv[static argc]) {
 				} else if (match < indent_stack.len - 1) {
 					REPORT_ERROR(ERROR_SYN_EXPECTED, token.location);
 					REPORT_ERROR(NOTE_SYN_TO_MATCH,
-					             indent_stack.data[match].location);
+					             indent_stack.data[indent_stack.len - 1].location);
 					indent_stack.len = match + 1;
 				} else {
 					indent_stack.len--;
