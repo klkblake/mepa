@@ -108,46 +108,21 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 	}
 	// TODO only use control codes if output is terminal
 	// TODO sort out columns vs characters vs bytes in this function
-	char red[] = "\x1b[1;31m";
-	char white[] = "\x1b[1;37m";
-	char green[] = "\x1b[1;32m";
-	char grey[] = "\x1b[1;30m";
-	char magenta[] = "\x1b[1;35m"; // XXX for warnings, when they are added
-	char reset[] = "\x1b[0m";
-	char *severity;
-	char *severity_color;
-	if (code < ERROR_END) {
-		severity = "error";
-		severity_color = red;
-	} else {
-		severity = "note";
-		severity_color = grey;
-	}
+#define TERM_RED     "\x1b[1;31m"
+#define TERM_WHITE   "\x1b[1;37m"
+#define TERM_GREEN   "\x1b[1;32m"
+#define TERM_GREY    "\x1b[1;30m"
+#define TERM_MAGENTA "\x1b[1;35m" /* XXX for warnings, when they are added */
+#define TERM_RESET   "\x1b[0m"
 	u8 *line = file->data + file->lines[location.line - 1];
 	u8 *end = (u8 *) strchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
-	// Make sure the initial size is large enough that we don't have to
-	// grow it when printing the source or carat lines
-	u32 cap = size * 8;
-	u8 *buf = malloc(cap);
-	u32 len = 0;
-#define APPEND_(str, size) \
-	while (len + (size) > cap) { \
-		cap += cap >> 1; \
-		buf = realloc(buf, cap); \
-	} \
-	memcpy(buf + len, str, size); \
-	len += size
-#define APP_CONST(str) do { APPEND_(str, sizeof(str) - 1); } while (false)
-#define APP_SZ(str, size) do { APPEND_(str, size); } while (false)
+	fprintf(stderr, TERM_WHITE "%s:%d:%d: ", file->name, location.line, location.column);
 	if (code < ERROR_END) {
-		APP_CONST(red);
-		APP_CONST("error: ");
+		fputs(TERM_RED "error: " TERM_WHITE, stderr);
 	} else {
-		APP_CONST(grey);
-		APP_CONST("note: ");
+		fputs(TERM_GREY "note: " TERM_WHITE, stderr);
 	}
-	APP_CONST(white);
 	char *message = error_messages[code];
 	u32 message_len = (u32)strlen(message);
 	u32 argc = 0;
@@ -169,51 +144,41 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 	while (message < message_end) {
 		char *next_spec = strchr(message, '%');
 		if (next_spec == NULL) {
-			APP_SZ(message, (u32)(message_end - message));
+			fwrite(message, 1, (u32)(message_end - message), stderr);
 			break;
 		}
-		APP_SZ(message, (u32)(next_spec - message));
+		fwrite(message, 1, (u32)(next_spec - message), stderr);
 		message = next_spec;
 		assert(message + 1 < message_end);
 		u8 c = (u8)message[1];
 		assert('0' <= c && c <= '0');
 		c -= '0';
 		u32 arg_len = (u32)strlen(argv[c]);
-		APP_SZ(argv[c], arg_len);
+		fwrite(argv[c], 1, arg_len, stderr);
 		message += 2;
 	}
-	APP_CONST(reset);
-	fprintf(stderr, "%s%s:%d:%d: %.*s\n", white, file->name, location.line, location.column, len, buf);
-#undef APP_SZ
-#undef APP_CONST
-#undef APPEND_
-	// TODO should we trust this to not overflow the stack?
+	fputs(TERM_RESET "\n", stderr);
 	u32 num_cols = 0;
-	len = 0;
 	for (u32 i = 0; i < size; i++) {
 		// TODO Map C1 codes (code points 0x80-0x9f, utf-8 0xc2 0x80 to 0xc2 9f) to the replacement character
 		// TODO sanitise against malformed UTF-8
 		if (line[i] == '\t') {
-			for (u32 k = 0; k < 8; k++) {
-				buf[len++] = ' ';
-			}
+			fputs("        ", stderr);
 			num_cols += 7;
 		} else if (line[i] < ' ') {
 			// Map C0 control codes to control pictures
-			buf[len++] = 0xe2;
-			buf[len++] = 0x90;
-			buf[len++] = 0x80 | line[i];
+			u8 chr[] = { 0xe2, 0x90, 0x80 | line[i] };
+			fwrite(chr, 1, sizeof(chr), stderr);
 		} else if (line[i] == 0x7f) {
 			// Map DEL to its control picture
-			buf[len++] = 0xe2;
-			buf[len++] = 0x90;
-			buf[len++] = 0xa1;
+			u8 chr[] = { 0xe2, 0x90, 0xa1 };
+			fwrite(chr, 1, sizeof(chr), stderr);
 		} else {
-			buf[len++] = line[i];
+			fputc(line[i], stderr);
 		}
 		num_cols++;
 	}
-	fprintf(stderr, "%.*s\n", len, buf);
+	fputc('\n', stderr);
 	// TODO handle utf-8!
 	// TODO handle invalid utf-8 iff we are reporting a UTF-8 error
 	assert(location.line || !range.start.line && !range.end.line);
@@ -229,7 +194,7 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 	if (range.end.line == location.line) {
 		col_end = range.end.column - 1;
 	}
-	len = 0;
+	fputs(TERM_GREEN, stderr);
 	for (u32 i = 0, col = 0; i < size; i++) {
 		u8 c;
 		if (col == location.column - 1) {
@@ -241,15 +206,15 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 		}
 		if (line[i] == '\t') {
 			for (u32 k = 0; k < 8; k++) {
-				buf[len++] = c;
+				fputc(c, stderr);
 			}
 			col += 8;
 		} else {
-			buf[len++] = c;
+			fputc(c, stderr);
 			col++;
 		}
 	}
-	fprintf(stderr, "%s%.*s%s\n", green, len, buf, reset);
+	fputs(TERM_RESET "\n", stderr);
 }
 
 internal
@@ -889,6 +854,7 @@ Command commands[] = {
 };
 
 int main(int argc, char **argv) {
+	setlinebuf(stderr);
 	if (argc == 1) {
 		usage();
 		return EX_USAGE;
