@@ -701,7 +701,23 @@ int format_main(int argc, char *argv[static argc]) {
 		file_stream = nonnull_or_die(fopen(argv[optind], "r"), EX_NOINPUT);
 		file.name = argv[optind];
 	}
-	u32 cap = 4096;
+	s64 estimate = -1;
+	if (fseek(file_stream, 0, SEEK_END) == 0) {
+		estimate = ftell(file_stream);
+		if (estimate != -1) {
+			if (estimate >= -1u) {
+				fprintf(stderr, "%s exceeds maximum file size of 4GB - 1\n", file.name);
+				return EX_DATAERR;
+			}
+		}
+		rewind(file_stream);
+	}
+	u32 cap;
+	if (estimate != -1) {
+		cap = estimate > 8 ? (u32)estimate : 8;
+	} else {
+		cap = 4096;
+	}
 	file.data = malloc(cap);
 	u32 lines = 0;
 	while (true) {
@@ -735,6 +751,10 @@ int format_main(int argc, char *argv[static argc]) {
 	fclose(file_stream);
 	if (file.len == 0) {
 		return 0;
+	}
+	if (estimate != -1 && file.len != estimate) {
+		fprintf(stderr, "%s changed whilst reading", file.name);
+		return EX_IOERR;
 	}
 	if (file.data[file.len - 1] != '\n') {
 		file.data = realloc(file.data, file.len + 1);
