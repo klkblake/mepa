@@ -652,6 +652,23 @@ int help_main(int argc, char *argv[static argc]) {
 }
 
 internal
+void print_newline(Token *token, u32 wanted_indent, u32 wanted_align) {
+	u32 given_indent = newline_indent(token);
+	u32 given_align = newline_align(token);
+	if (given_indent == wanted_indent && given_align == wanted_align) {
+		fwrite(token->start, 1, token->len, stdout);
+	} else {
+		putchar('\n');
+		for (u32 i = 0; i < wanted_indent; i++) {
+			putchar('\t');
+		}
+		for (u32 i = 0; i < wanted_align; i++) {
+			putchar(' ');
+		}
+	}
+}
+
+internal
 int format_main(int argc, char *argv[static argc]) {
 	FILE *file_stream;
 	SourceFile file = {};
@@ -782,16 +799,14 @@ int format_main(int argc, char *argv[static argc]) {
 	indent_stack.data = malloc(indent_stack.cap * sizeof(Indent));
 	indent_stack.len = 1;
 	indent_stack.data[0] = (Indent){};
-	Token token = { .type = TOK_UNKNOWN };
-	Token peek_token;
-	next_token(&state, &token);
+	Token prev_token = { .type = TOK_UNKNOWN };
+	Token token;
 #define REPORT_ERROR(code, location, ...) report_error(&errors, &file, code, location, (Range){}, ##__VA_ARGS__)
+	u32 post_indent_column = 1;
 	while (token.type != TOK_EOF) {
-		next_token(&state, &peek_token);
-		printf("%s:%u:%u: ", file.name, token.location.line, token.location.column);
+		next_token(&state, &token);
 		switch (token.type) {
-		case TOK_WORD: printf("WORD \"%.*s\"", token.len, token.start); break;
-		case TOK_SYMBOL: printf("SYMBOL '%.*s'", token.len, token.start); break;
+		// TODO enforce open brace not on new line. Maybe compress multiple newline tokens?
 		case TOK_BRACKET:
 		{
 			u8 c = *token.start;
@@ -816,21 +831,25 @@ int format_main(int argc, char *argv[static argc]) {
 					new->indent = old->indent + 1;
 					new->align = 0;
 				} else {
-					// TODO pull out tab width into constant
 					new->indent = old->indent;
-					new->align = token.location.column - old->indent * 8;
+					new->align = post_indent_column;
 				}
-				printf("OPEN '%.*s' indent=%u, align=%u",
-				       token.len, token.start, new->indent, new->align);
+				if (prev_token.type == TOK_NEWLINE) {
+					print_newline(&prev_token, old->indent, old->align);
+					post_indent_column = 1 + old->align;
+				}
 			} else {
 				u32 match = indent_stack.len - 1;
 				while (match > 0 && indent_stack.data[match].type != type) {
 					match--;
 				}
+				Indent *indent;
 				if (indent_stack.len == 1) {
 					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
+					indent = &indent_stack.data[0];
 				} else if (match == 0) {
 					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
+					indent = &indent_stack.data[indent_stack.len - 1];
 				} else if (match < indent_stack.len - 1) {
 					u8 wanted = indent_stack.data[indent_stack.len - 1].type;
 					u8 open_str[2] = { open[wanted], 0 };
@@ -838,26 +857,56 @@ int format_main(int argc, char *argv[static argc]) {
 					REPORT_ERROR(ERROR_SYN_EXPECTED, token.location, close_str);
 					REPORT_ERROR(NOTE_SYN_TO_MATCH,
 					             indent_stack.data[indent_stack.len - 1].location, open_str);
-					indent_stack.len = match + 1;
+					indent_stack.len = match;
+					indent = &indent_stack.data[match];
+					if (type == 2) {
+						indent->indent--;
+					}
 				} else {
 					indent_stack.len--;
+					indent = &indent_stack.data[indent_stack.len];
+					if (type == 2) {
+						indent->indent--;
+					}
 				}
-				Indent *new = &indent_stack.data[indent_stack.len - 1];
-				printf("CLOSE '%.*s' indent=%u, align=%u",
-				       token.len, token.start, new->indent, new->align);
+				if (prev_token.type == TOK_NEWLINE) {
+					print_newline(&prev_token, indent->indent, indent->align);
+					post_indent_column = 1 + indent->align;
+				}
+			}
+			assert(token.len == 1);
+			fwrite(token.start, 1, 1, stdout);
+			post_indent_column++;
+			break;
+		}
+		case TOK_WORD:
+		case TOK_SYMBOL:
+		case TOK_STRING:
+		case TOK_SPACES:
+		case TOK_COMMENT:
+		case TOK_UNKNOWN:
+		{
+			if (prev_token.type == TOK_NEWLINE) {
+				Indent *indent = &indent_stack.data[indent_stack.len - 1];
+				print_newline(&prev_token, indent->indent, indent->align);
+				post_indent_column = 1 + indent->align;
+			}
+			fwrite(token.start, 1, token.len, stdout);
+			// TODO column vs character vs byte count
+			post_indent_column += token.len;
+			break;
+		}
+		case TOK_NEWLINE:
+		case TOK_EOF:
+		{
+			if (prev_token.type == TOK_NEWLINE) {
+				putchar('\n');
+				post_indent_column = 1;
 			}
 			break;
 		}
-		case TOK_STRING: printf("STRING \"%.*s\"", token.len, token.start); break;
-		case TOK_NEWLINE: printf("NEWLINE indent=%u, align=%u",
-		                         newline_indent(&token), newline_align(&token)); break;
-		case TOK_SPACES: printf("SPACES \"%.*s\"", token.len, token.start); break;
-		case TOK_COMMENT: printf("COMMENT \"%.*s\"", token.len, token.start); break;
-		case TOK_UNKNOWN: printf("UNKNOWN \"%.*s\"", token.len, token.start); break;
-		case TOK_EOF: printf("EOF"); break;
 		}
-		printf("\n");
-		token = peek_token;
+		prev_token = token;
 	}
 #undef REPORT_ERROR
 	// TODO don't free memory that is about to be freed by program exit
