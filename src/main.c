@@ -101,7 +101,8 @@ typedef struct {
 } LexerState;
 
 internal
-void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location location, Range range, ...) {
+void vreport_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code, Location location, Range range,
+                        va_list args) {
 	errors->count++;
 	if (errors->limit && errors->count > errors->limit) {
 		return;
@@ -114,10 +115,9 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 #define TERM_GREY    "\x1b[1;30m"
 #define TERM_MAGENTA "\x1b[1;35m" /* XXX for warnings, when they are added */
 #define TERM_RESET   "\x1b[0m"
-	u8 *line = file->data + file->lines[location.line - 1];
 	u8 *end = (u8 *) strchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
-	fprintf(stderr, TERM_WHITE "%s:%d:%d: ", file->name, location.line, location.column);
+	fprintf(stderr, TERM_WHITE "%s:%d:%d: ", file, location.line, location.column);
 	if (code < ERROR_END) {
 		fputs(TERM_RED "error: " TERM_WHITE, stderr);
 	} else {
@@ -133,12 +133,9 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 	}
 	char *argv[argc];
 	if (argc) {
-		va_list list;
-		va_start(list, range);
 		for (u32 i = 0; i < argc; i++) {
-			argv[i] = va_arg(list, char *);
+			argv[i] = va_arg(args, char *);
 		}
-		va_end(list);
 	}
 	char *message_end = message + message_len;
 	while (message < message_end) {
@@ -215,6 +212,23 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 		}
 	}
 	fputs(TERM_RESET "\n", stderr);
+}
+
+internal
+void report_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code, Location location, Range range, ...) {
+	va_list args;
+	va_start(args, range);
+	vreport_error_line(errors, file, line, code, location, range, args);
+	va_end(args);
+}
+
+internal
+void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location location, Range range, ...) {
+	va_list args;
+	va_start(args, range);
+	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1], code, location, range,
+	                   args);
+	va_end(args);
 }
 
 internal
@@ -509,11 +523,12 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 		0,
 		malloc(lines * sizeof(u32)),
 	};
+	u32 line_offset = 0;
 	u32 index = 0;
 	b32 last_not_newline = false;
 	b32 last_tab = false;
 	b32 first_char = true;
-#define REPORT_ERROR(code) report_error(errors, &file, code, location, (Range){})
+#define REPORT_ERROR(code) report_error_line(errors, file.name, file.data + line_offset, code, location, (Range){})
 	while (index < file.len) {
 		if (last_tab) {
 			location.column += 8;
@@ -522,7 +537,7 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 		} else {
 			location.line++;
 			location.column = 1;
-			file.lines[location.line - 1] = index;
+			line_offset = index;
 			vfile.lines[location.line - 1] = vfile.len;
 		}
 retry:
@@ -728,7 +743,6 @@ int format_main(int argc, char *argv[static argc]) {
 	} else {
 		file.data = realloc(file.data, file.len);
 	}
-	file.lines = malloc(lines * sizeof(u32));
 	file = validate_utf8(file, lines, &errors);
 	LexerState state = {};
 	state.errors = &errors;
