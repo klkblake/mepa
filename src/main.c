@@ -115,7 +115,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code
 #define TERM_GREY    "\x1b[1;30m"
 #define TERM_MAGENTA "\x1b[1;35m" /* XXX for warnings, when they are added */
 #define TERM_RESET   "\x1b[0m"
-	u8 *end = (u8 *) strchr((char *)line, '\n');
+	u8 *end = rawmemchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
 	fprintf(stderr, TERM_WHITE "%s:%d:%d: ", file, location.line, location.column);
 	if (code < ERROR_END) {
@@ -694,11 +694,10 @@ void print_newline(Buf *buf, Token *token, u32 wanted_indent, u32 wanted_align) 
 }
 
 internal
-int format_main(int argc, char *argv[static argc]) {
-	FILE *file_stream;
+int process_common_command_line(int argc, char *argv[static argc], SourceFile *vfile, ErrorCount *errors) {
 	SourceFile file = {};
-	ErrorCount errors = {};
-	errors.limit = 20;
+	*errors = (ErrorCount){};
+	errors->limit = 20;
 
 	const int CODE_ERROR_LIMIT = 256;
 	struct option longopts[] = {
@@ -726,7 +725,7 @@ int format_main(int argc, char *argv[static argc]) {
 				fprintf(stderr, "Argument to --error-limit out of range\n");
 				return EX_USAGE;
 			}
-			errors.limit = (u32)value;
+			errors->limit = (u32)value;
 			break;
 		}
 		case '?': return EX_USAGE;
@@ -736,6 +735,7 @@ int format_main(int argc, char *argv[static argc]) {
 		fprintf(stderr, "format expects exactly one file");
 		return EX_USAGE;
 	}
+	FILE *file_stream;
 	if (optind == argc || strcmp(argv[optind], "-") == 0) {
 		file_stream = stdin;
 		file.name = "<stdin>";
@@ -805,7 +805,29 @@ int format_main(int argc, char *argv[static argc]) {
 	} else {
 		file.data = realloc(file.data, file.len);
 	}
-	file = validate_utf8(file, lines, &errors);
+	*vfile = validate_utf8(file, lines, errors);
+	return 0;
+}
+
+internal
+b32 print_error_summary(ErrorCount errors) {
+	if (errors.count > 0) {
+		if (!errors.limit || errors.count <= errors.limit) {
+			fprintf(stderr, "%u errors\n", errors.count);
+		} else {
+			fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
+		}
+		return true;
+	}
+	return false;
+}
+
+internal
+int format_main(int argc, char *argv[static argc]) {
+	SourceFile file;
+	ErrorCount errors;
+	process_common_command_line(argc, argv, &file, &errors);
+
 	LexerState state = {};
 	state.errors = &errors;
 	state.file = file;
@@ -939,12 +961,7 @@ int format_main(int argc, char *argv[static argc]) {
 #undef REPORT_ERROR
 	// TODO don't free memory that is about to be freed by program exit
 	free(indent_stack.data);
-	if (errors.count > 0) {
-		if (!errors.limit || errors.count <= errors.limit) {
-			fprintf(stderr, "%u errors\n", errors.count);
-		} else {
-			fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
-		}
+	if (print_error_summary(errors)) {
 		fwrite(output.data, 1, output.len, stdout);
 		return 1;
 	}
