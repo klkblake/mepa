@@ -651,19 +651,44 @@ int help_main(int argc, char *argv[static argc]) {
 	return 0;
 }
 
+typedef struct {
+	u8 *data;
+	u32 len;
+	u32 cap;
+} Buf;
+
 internal
-void print_newline(Token *token, u32 wanted_indent, u32 wanted_align) {
+void buf_append(Buf *buf, u8 *src, u32 len) {
+	if (buf->len + len > buf->cap) {
+		buf->cap += buf->cap >> 1;
+		buf->data = realloc(buf->data, buf->cap);
+	}
+	memcpy(buf->data + buf->len, src, len);
+	buf->len += len;
+}
+
+internal
+void buf_push(Buf *buf, u8 c) {
+	if (buf->len >= buf->cap) {
+		buf->cap += buf->cap >> 1;
+		buf->data = realloc(buf->data, buf->cap);
+	}
+	buf->data[buf->len++] = c;
+}
+
+internal
+void print_newline(Buf *buf, Token *token, u32 wanted_indent, u32 wanted_align) {
 	u32 given_indent = newline_indent(token);
 	u32 given_align = newline_align(token);
 	if (given_indent == wanted_indent && given_align == wanted_align) {
-		fwrite(token->start, 1, token->len, stdout);
+		buf_append(buf, token->start, token->len);
 	} else {
-		putchar('\n');
+		buf_push(buf, '\n');
 		for (u32 i = 0; i < wanted_indent; i++) {
-			putchar('\t');
+			buf_push(buf, '\t');
 		}
 		for (u32 i = 0; i < wanted_align; i++) {
-			putchar(' ');
+			buf_push(buf, ' ');
 		}
 	}
 }
@@ -803,6 +828,9 @@ int format_main(int argc, char *argv[static argc]) {
 	Token token;
 #define REPORT_ERROR(code, location, ...) report_error(&errors, &file, code, location, (Range){}, ##__VA_ARGS__)
 	u32 post_indent_column = 1;
+	Buf output = {};
+	output.cap = file.len;
+	output.data = malloc(output.cap);
 	while (token.type != TOK_EOF) {
 		next_token(&state, &token);
 		switch (token.type) {
@@ -835,7 +863,7 @@ int format_main(int argc, char *argv[static argc]) {
 					new->align = post_indent_column;
 				}
 				if (prev_token.type == TOK_NEWLINE) {
-					print_newline(&prev_token, old->indent, old->align);
+					print_newline(&output, &prev_token, old->indent, old->align);
 					post_indent_column = 1 + old->align;
 				}
 			} else {
@@ -870,12 +898,12 @@ int format_main(int argc, char *argv[static argc]) {
 					}
 				}
 				if (prev_token.type == TOK_NEWLINE) {
-					print_newline(&prev_token, indent->indent, indent->align);
+					print_newline(&output, &prev_token, indent->indent, indent->align);
 					post_indent_column = 1 + indent->align;
 				}
 			}
 			assert(token.len == 1);
-			fwrite(token.start, 1, 1, stdout);
+			buf_append(&output, token.start, 1);
 			post_indent_column++;
 			break;
 		}
@@ -888,10 +916,10 @@ int format_main(int argc, char *argv[static argc]) {
 		{
 			if (prev_token.type == TOK_NEWLINE) {
 				Indent *indent = &indent_stack.data[indent_stack.len - 1];
-				print_newline(&prev_token, indent->indent, indent->align);
+				print_newline(&output, &prev_token, indent->indent, indent->align);
 				post_indent_column = 1 + indent->align;
 			}
-			fwrite(token.start, 1, token.len, stdout);
+			buf_append(&output, token.start, token.len);
 			// TODO column vs character vs byte count
 			post_indent_column += token.len;
 			break;
@@ -900,7 +928,7 @@ int format_main(int argc, char *argv[static argc]) {
 		case TOK_EOF:
 		{
 			if (prev_token.type == TOK_NEWLINE) {
-				putchar('\n');
+				buf_push(&output, '\n');
 				post_indent_column = 1;
 			}
 			break;
@@ -917,8 +945,10 @@ int format_main(int argc, char *argv[static argc]) {
 		} else {
 			fprintf(stderr, "%u errors, only first %u reported\n", errors.count, errors.limit);
 		}
+		fwrite(output.data, 1, output.len, stdout);
 		return 1;
 	}
+	fwrite(output.data, 1, output.len, stdout);
 	return 0;
 }
 
