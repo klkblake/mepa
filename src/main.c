@@ -651,48 +651,6 @@ int help_main(int argc, char *argv[static argc]) {
 	return 0;
 }
 
-typedef struct {
-	u8 *data;
-	u32 len;
-	u32 cap;
-} Buf;
-
-internal
-void buf_append(Buf *buf, u8 *src, u32 len) {
-	if (buf->len + len > buf->cap) {
-		buf->cap += buf->cap >> 1;
-		buf->data = realloc(buf->data, buf->cap);
-	}
-	memcpy(buf->data + buf->len, src, len);
-	buf->len += len;
-}
-
-internal
-void buf_push(Buf *buf, u8 c) {
-	if (buf->len >= buf->cap) {
-		buf->cap += buf->cap >> 1;
-		buf->data = realloc(buf->data, buf->cap);
-	}
-	buf->data[buf->len++] = c;
-}
-
-internal
-void print_newline(Buf *buf, Token *token, u32 wanted_indent, u32 wanted_align) {
-	u32 given_indent = newline_indent(token);
-	u32 given_align = newline_align(token);
-	if (given_indent == wanted_indent && given_align == wanted_align) {
-		buf_append(buf, token->start, token->len);
-	} else {
-		buf_push(buf, '\n');
-		for (u32 i = 0; i < wanted_indent; i++) {
-			buf_push(buf, '\t');
-		}
-		for (u32 i = 0; i < wanted_align; i++) {
-			buf_push(buf, ' ');
-		}
-	}
-}
-
 internal
 int process_common_command_line(int argc, char *argv[static argc], SourceFile *vfile, ErrorCount *errors) {
 	SourceFile file = {};
@@ -822,111 +780,154 @@ b32 print_error_summary(ErrorCount errors) {
 	return false;
 }
 
+typedef struct {
+	u8 *data;
+	u32 len;
+	u32 cap;
+} Buf;
+
+internal
+void buf_append(Buf *buf, u8 *src, u32 len) {
+	if (buf->len + len > buf->cap) {
+		buf->cap += buf->cap >> 1;
+		buf->data = realloc(buf->data, buf->cap);
+	}
+	memcpy(buf->data + buf->len, src, len);
+	buf->len += len;
+}
+
+internal
+void buf_push(Buf *buf, u8 c) {
+	if (buf->len >= buf->cap) {
+		buf->cap += buf->cap >> 1;
+		buf->data = realloc(buf->data, buf->cap);
+	}
+	buf->data[buf->len++] = c;
+}
+
+// Brackets are mapped to types by (c >> 5) - 1, which gives:
+// '(', ')' => 0
+// '[', ']' => 1
+// '{', '}' => 2
+typedef struct {
+	u32 indent;
+	u32 align;
+	u8 type;
+	Location location;
+} Indent;
+
+internal u8 open_bracket[]  = { '(', '[', '{' };
+internal u8 close_bracket[] = { ')', ']', '}' };
+
+typedef struct {
+	Indent *data;
+	u32 len;
+	u32 cap;
+	u32 post_indent_column;
+} FormatState;
+
+internal
+void print_newline(FormatState *state, Buf *buf, Token *token, Indent *indent) {
+	u32 given_indent = newline_indent(token);
+	u32 given_align = newline_align(token);
+	if (given_indent == indent->indent && given_align == indent->align) {
+		buf_append(buf, token->start, token->len);
+	} else {
+		buf_push(buf, '\n');
+		for (u32 i = 0; i < indent->indent; i++) {
+			buf_push(buf, '\t');
+		}
+		for (u32 i = 0; i < indent->align; i++) {
+			buf_push(buf, ' ');
+		}
+	}
+	state->post_indent_column = 1 + indent->align;
+}
+
 internal
 int format_main(int argc, char *argv[static argc]) {
 	SourceFile file;
 	ErrorCount errors;
 	process_common_command_line(argc, argv, &file, &errors);
 
-	LexerState state = {};
-	state.errors = &errors;
-	state.file = file;
-	typedef struct {
-		u32 indent;
-		u32 align;
-		u8 type;
-		Location location;
-	} Indent;
-	struct {
-		Indent *data;
-		u32 len;
-		u32 cap;
-	} indent_stack;
-	indent_stack.cap = 8;
-	indent_stack.data = malloc(indent_stack.cap * sizeof(Indent));
-	indent_stack.len = 1;
-	indent_stack.data[0] = (Indent){};
+	LexerState lex_state = {};
+	lex_state.errors = &errors;
+	lex_state.file = file;
+	FormatState fmt_state;
+	fmt_state.cap = 8;
+	fmt_state.data = malloc(fmt_state.cap * sizeof(Indent));
+	fmt_state.len = 1;
+	fmt_state.data[0] = (Indent){};
+	fmt_state.post_indent_column = 1;
 	Token prev_token = { .type = TOK_UNKNOWN };
 	Token token;
 #define REPORT_ERROR(code, location, ...) report_error(&errors, &file, code, location, (Range){}, ##__VA_ARGS__)
-	u32 post_indent_column = 1;
 	Buf output = {};
 	output.cap = file.len;
 	output.data = malloc(output.cap);
 	while (token.type != TOK_EOF) {
-		next_token(&state, &token);
+		next_token(&lex_state, &token);
 		switch (token.type) {
 		// TODO enforce open brace not on new line. Maybe compress multiple newline tokens?
 		case TOK_BRACKET:
 		{
+			Indent *indent;
+			assert(token.len == 1);
 			u8 c = *token.start;
-			// Map to a dense range
-			// '(', ')' => 0
-			// '[', ']' => 1
-			// '{', '}' => 2
 			u8 type = (c >> 5) - 1;
-			u8 open[]  = { '(', '[', '{' };
-			u8 close[] = { ')', ']', '}' };
-			if (c == open[type]) {
-				if (indent_stack.len == indent_stack.cap) {
-					indent_stack.cap += indent_stack.cap >> 1;
-					indent_stack.data = realloc(indent_stack.data,
-					                            indent_stack.cap * sizeof(Indent));
+			if (c == open_bracket[type]) {
+				if (fmt_state.len == fmt_state.cap) {
+					fmt_state.cap += fmt_state.cap >> 1;
+					fmt_state.data = realloc(fmt_state.data,
+					                            fmt_state.cap * sizeof(Indent));
 				}
-				Indent *old = &indent_stack.data[indent_stack.len - 1];
-				Indent *new = &indent_stack.data[indent_stack.len++];
+				indent = &fmt_state.data[fmt_state.len - 1];
+				Indent *new = &fmt_state.data[fmt_state.len++];
 				new->location = token.location;
 				new->type = type;
 				if (c == '{') {
-					new->indent = old->indent + 1;
+					new->indent = indent->indent + 1;
 					new->align = 0;
 				} else {
-					new->indent = old->indent;
-					new->align = post_indent_column;
-				}
-				if (prev_token.type == TOK_NEWLINE) {
-					print_newline(&output, &prev_token, old->indent, old->align);
-					post_indent_column = 1 + old->align;
+					new->indent = indent->indent;
+					new->align = fmt_state.post_indent_column;
 				}
 			} else {
-				u32 match = indent_stack.len - 1;
-				while (match > 0 && indent_stack.data[match].type != type) {
+				u32 match = fmt_state.len - 1;
+				while (match > 0 && fmt_state.data[match].type != type) {
 					match--;
 				}
-				Indent *indent;
-				if (indent_stack.len == 1) {
+				if (fmt_state.len == 1) {
 					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
-					indent = &indent_stack.data[0];
+					indent = &fmt_state.data[0];
 				} else if (match == 0) {
 					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
-					indent = &indent_stack.data[indent_stack.len - 1];
-				} else if (match < indent_stack.len - 1) {
-					u8 wanted = indent_stack.data[indent_stack.len - 1].type;
-					u8 open_str[2] = { open[wanted], 0 };
-					u8 close_str[2] = { close[wanted], 0 };
+					indent = &fmt_state.data[fmt_state.len - 1];
+				} else if (match < fmt_state.len - 1) {
+					u8 wanted = fmt_state.data[fmt_state.len - 1].type;
+					u8 open_str[2] = { open_bracket[wanted], 0 };
+					u8 close_str[2] = { close_bracket[wanted], 0 };
 					REPORT_ERROR(ERROR_SYN_EXPECTED, token.location, close_str);
 					REPORT_ERROR(NOTE_SYN_TO_MATCH,
-					             indent_stack.data[indent_stack.len - 1].location, open_str);
-					indent_stack.len = match;
-					indent = &indent_stack.data[match];
+					             fmt_state.data[fmt_state.len - 1].location, open_str);
+					fmt_state.len = match;
+					indent = &fmt_state.data[match];
 					if (type == 2) {
 						indent->indent--;
 					}
 				} else {
-					indent_stack.len--;
-					indent = &indent_stack.data[indent_stack.len];
+					fmt_state.len--;
+					indent = &fmt_state.data[fmt_state.len];
 					if (type == 2) {
 						indent->indent--;
 					}
 				}
-				if (prev_token.type == TOK_NEWLINE) {
-					print_newline(&output, &prev_token, indent->indent, indent->align);
-					post_indent_column = 1 + indent->align;
-				}
 			}
-			assert(token.len == 1);
+			if (prev_token.type == TOK_NEWLINE) {
+				print_newline(&fmt_state, &output, &prev_token, indent);
+			}
+			fmt_state.post_indent_column++;
 			buf_append(&output, token.start, 1);
-			post_indent_column++;
 			break;
 		}
 		case TOK_WORD:
@@ -937,21 +938,19 @@ int format_main(int argc, char *argv[static argc]) {
 		case TOK_UNKNOWN:
 		{
 			if (prev_token.type == TOK_NEWLINE) {
-				Indent *indent = &indent_stack.data[indent_stack.len - 1];
-				print_newline(&output, &prev_token, indent->indent, indent->align);
-				post_indent_column = 1 + indent->align;
+				Indent *indent = &fmt_state.data[fmt_state.len - 1];
+				print_newline(&fmt_state, &output, &prev_token, indent);
 			}
-			buf_append(&output, token.start, token.len);
 			// TODO column vs character vs byte count
-			post_indent_column += token.len;
+			fmt_state.post_indent_column += token.len;
+			buf_append(&output, token.start, token.len);
 			break;
 		}
 		case TOK_NEWLINE:
 		case TOK_EOF:
 		{
 			if (prev_token.type == TOK_NEWLINE) {
-				buf_push(&output, '\n');
-				post_indent_column = 1;
+				print_newline(&fmt_state, &output, &prev_token, &fmt_state.data[0]);
 			}
 			break;
 		}
@@ -960,7 +959,7 @@ int format_main(int argc, char *argv[static argc]) {
 	}
 #undef REPORT_ERROR
 	// TODO don't free memory that is about to be freed by program exit
-	free(indent_stack.data);
+	free(fmt_state.data);
 	if (print_error_summary(errors)) {
 		fwrite(output.data, 1, output.len, stdout);
 		return 1;
