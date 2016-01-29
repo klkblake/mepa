@@ -374,7 +374,7 @@ b32 is_bracket(s32 c) {
 }
 
 internal
-void next_token(Lexer *lexer, Token *token) {
+void lexer_next_token(Lexer *lexer, Token *token) {
 	s32 c;
 	token->start = lexer->file.data + lexer->index;
 	c = next_char(lexer);
@@ -866,7 +866,7 @@ int format_main(int argc, char *argv[static argc]) {
 	output.cap = file.len;
 	output.data = malloc(output.cap);
 	while (token.type != TOK_EOF) {
-		next_token(&lexer, &token);
+		lexer_next_token(&lexer, &token);
 		switch (token.type) {
 		// TODO enforce open brace not on new line. Maybe compress multiple newline tokens?
 		case TOK_BRACKET:
