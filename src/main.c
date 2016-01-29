@@ -14,7 +14,7 @@ typedef struct {
 
 typedef enum {
 	TOK_WORD,
-	TOK_SYMBOL,
+	TOK_OPERATOR,
 	TOK_BRACKET,
 	TOK_STRING,
 	TOK_NEWLINE,
@@ -446,7 +446,8 @@ void lexer_next_token(Lexer *lexer, Token *token) {
 		}
 	}
 	if (is_symbol(c)) {
-		token->type = TOK_SYMBOL;
+		token->type = TOK_OPERATOR;
+		ADD_WHILE(is_symbol(c));
 		return;
 	}
 	if (is_bracket(c)) {
@@ -913,7 +914,7 @@ int format_main(int argc, char *argv[static argc]) {
 			break;
 		}
 		case TOK_WORD:
-		case TOK_SYMBOL:
+		case TOK_OPERATOR:
 		case TOK_STRING:
 		case TOK_SPACES:
 		case TOK_COMMENT:
