@@ -324,9 +324,9 @@ b32 is_start_letter(s32 c) {
 	if (c == -1) {
 		return false;
 	}
-	return in_unicode_range((u32)c,
-	                        xid_start_table_16, array_count(xid_start_table_16),
-	                        xid_start_table_32, array_count(xid_start_table_32));
+	return c == '_' || in_unicode_range((u32)c,
+	                                    xid_start_table_16, array_count(xid_start_table_16),
+	                                    xid_start_table_32, array_count(xid_start_table_32));
 }
 
 internal
