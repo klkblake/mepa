@@ -619,16 +619,6 @@ retry:
 	return vfile;
 }
 
-internal
-void usage() {
-	fprintf(stderr,
-	        "usage: mepa <command> [<options>] [<args>]\n"
-	        "\n"
-	        "Commands:\n"
-	        "    help             - show this usage text\n"
-	        "    format [<file>]  - reformat code\n");
-}
-
 internal __attribute__((noreturn))
 void die(u8 code) {
 	perror("mepa");
@@ -641,14 +631,6 @@ void *nonnull_or_die(void *ptr, u8 code) {
 		die(code);
 	}
 	return ptr;
-}
-
-internal
-int help_main(int argc, char *argv[static argc]) {
-	(void) argc;
-	(void) argv;
-	usage();
-	return 0;
 }
 
 internal
@@ -965,6 +947,25 @@ int format_main(int argc, char *argv[static argc]) {
 		return 1;
 	}
 	fwrite(output.data, 1, output.len, stdout);
+	return 0;
+}
+
+internal
+void usage() {
+	fprintf(stderr,
+	        "usage: mepa <command> [<options>] [<args>]\n"
+	        "\n"
+	        "Commands:\n"
+	        "    help              - show this usage text\n"
+	        "    format  [<file>]  - reformat code\n"
+	        "    compile [<file>]  - compile code\n");
+}
+
+internal
+int help_main(int argc, char *argv[static argc]) {
+	(void) argc;
+	(void) argv;
+	usage();
 	return 0;
 }
 
