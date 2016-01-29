@@ -31,49 +31,6 @@ typedef struct {
 	u32 len;
 } Token;
 
-typedef enum {
-	ERROR_UTF8_BOM_NOT_ALLOWED,
-	ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR,
-	ERROR_UTF8_OVERLONG_SEQUENCE,
-	ERROR_UTF8_EOF_IN_SEQUENCE,
-	ERROR_UTF8_SEQUENCE_TOO_SHORT,
-	ERROR_UTF8_WRONG_SEQUENCE_LENGTH,
-	ERROR_UTF8_SURROGATES_NOT_ALLOWED,
-	ERROR_UTF8_CODE_POINT_TOO_HIGH,
-
-	ERROR_LEX_EOF_IN_COMMENT,
-	ERROR_LEX_EOF_IN_STRING,
-	ERROR_LEX_UNTERMINATED_STRING,
-
-	ERROR_SYN_EXPECTED,
-	ERROR_SYN_EXTRA_CLOSING_BRACKET,
-	ERROR_END,
-
-	NOTE_SYN_TO_MATCH,
-} ErrorCode;
-
-internal char *error_messages[] = {
-	// TODO parameterise some of these
-	"byte order markers are not permitted",
-	"unexpected continuation byte",
-	"sequence too long (> 4 bytes)",
-	"hit EOF while decoding sequence",
-	"too few continuation bytes in sequence",
-	"sequence length too long for code point",
-	"surrogates are not permitted",
-	"code point exceeded limit of 0x10ffff",
-
-	"hit EOF while looking for end of comment",
-	"hit EOF while looking for end of string",
-	"string was not terminated before end of line",
-
-	"expected closing '%0'",
-	"extraneous closing bracket",
-	NULL,
-
-	"to match this '%0'",
-};
-
 typedef struct {
 	Location start;
 	Location end;
@@ -91,17 +48,10 @@ typedef struct {
 	u32 limit;
 } ErrorCount;
 
-typedef struct {
-	SourceFile file;
-	u32 index;
-	b32 last_not_newline;
-	b32 last_tab;
-	Location location;
-	ErrorCount *errors;
-} Lexer;
-
+#define ERROR "E"
+#define NOTE "N"
 internal
-void vreport_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code, Location location, Range range,
+void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message, Location location, Range range,
                         va_list args) {
 	errors->count++;
 	if (errors->limit && errors->count > errors->limit) {
@@ -118,12 +68,13 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code
 	u8 *end = rawmemchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
 	fprintf(stderr, TERM_WHITE "%s:%d:%d: ", file, location.line, location.column);
-	if (code < ERROR_END) {
+	if (message[0] == 'E') {
 		fputs(TERM_RED "error: " TERM_WHITE, stderr);
 	} else {
+		assert(message[0] == 'N');
 		fputs(TERM_GREY "note: " TERM_WHITE, stderr);
 	}
-	char *message = error_messages[code];
+	message++;
 	u32 message_len = (u32)strlen(message);
 	u32 argc = 0;
 	for (u32 i = 0; i < message_len; i++) {
@@ -215,21 +166,28 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code
 }
 
 internal
-void report_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code, Location location, Range range, ...) {
-	va_list args;
-	va_start(args, range);
-	vreport_error_line(errors, file, line, code, location, range, args);
-	va_end(args);
+void vreport_error(ErrorCount *errors, SourceFile *file, char *message, Location location, Range range,
+                   va_list args) {
+	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1], message, location, range,
+	                   args);
 }
 
 internal
-void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location location, Range range, ...) {
+void report_error(ErrorCount *errors, SourceFile *file, char *message, Location location, Range range, ...) {
 	va_list args;
 	va_start(args, range);
-	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1], code, location, range,
-	                   args);
+	vreport_error(errors, file, message, location, range, args);
 	va_end(args);
 }
+
+typedef struct {
+	SourceFile file;
+	u32 index;
+	b32 last_not_newline;
+	b32 last_tab;
+	Location location;
+	ErrorCount *errors;
+} Lexer;
 
 internal
 s32 peek(Lexer *lexer) {
@@ -374,6 +332,15 @@ b32 is_bracket(s32 c) {
 }
 
 internal
+void report_lex_error(Lexer *lexer, Token *token, char *message, ...) {
+	va_list args;
+	va_start(args, message);
+	vreport_error(lexer->errors, &lexer->file, message, token->location, (Range){token->location, lexer->location},
+	              args);
+	va_end(args);
+}
+
+internal
 void lexer_next_token(Lexer *lexer, Token *token) {
 	s32 c;
 	token->start = lexer->file.data + lexer->index;
@@ -402,9 +369,6 @@ void lexer_next_token(Lexer *lexer, Token *token) {
 		return;
 	}
 	token->location = lexer->location;
-#define REPORT_ERROR(code) \
-	report_error(lexer->errors, &lexer->file, code, \
-	             token->location, (Range){token->location, lexer->location})
 	if (c == ' ') {
 		token->type = TOK_SPACES;
 		ADD_WHILE(c == ' ');
@@ -423,7 +387,8 @@ void lexer_next_token(Lexer *lexer, Token *token) {
 			while (depth > 0) {
 				c = peek(lexer);
 				if (c == -1) {
-					REPORT_ERROR(ERROR_LEX_EOF_IN_COMMENT);
+					report_lex_error(lexer, token,
+					                 ERROR "hit EOF while looking for end of comment");
 					break;
 				}
 				next_char(lexer);
@@ -464,11 +429,11 @@ void lexer_next_token(Lexer *lexer, Token *token) {
 		while (true) {
 			c = peek(lexer);
 			if (c == -1) {
-				REPORT_ERROR(ERROR_LEX_EOF_IN_STRING);
+				report_lex_error(lexer, token, ERROR "hit EOF while looking for end of string");
 				break;
 			}
 			if (c == '\n') {
-				REPORT_ERROR(ERROR_LEX_UNTERMINATED_STRING);
+				report_lex_error(lexer, token, ERROR "string was not terminated before end of line");
 				break;
 			}
 			advance(lexer);
@@ -486,7 +451,6 @@ void lexer_next_token(Lexer *lexer, Token *token) {
 		return;
 	}
 	token->type = TOK_UNKNOWN;
-#undef REPORT_ERROR
 #undef ADD_WHILE
 }
 
@@ -515,31 +479,47 @@ u32 newline_align(Token *newline) {
 	return 0;
 }
 
+typedef struct {
+	SourceFile file;
+	Location location;
+	u32 line_offset;
+	ErrorCount *errors;
+} UTF8Validator;
+
+internal
+void report_utf8_error(UTF8Validator *state, char *message, ...) {
+	va_list args;
+	va_start(args, message);
+	vreport_error_line(state->errors, state->file.name, state->file.data + state->line_offset, message,
+	                   state->location, (Range){}, args);
+	va_end(args);
+}
+
 internal
 SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
-	Location location = {};
 	SourceFile vfile = {
 		file.name,
 		malloc(file.len),
 		0,
 		malloc(lines * sizeof(u32)),
 	};
-	u32 line_offset = 0;
+	UTF8Validator state = {};
+	state.file = file;
+	state.errors = errors;
 	u32 index = 0;
 	b32 last_not_newline = false;
 	b32 last_tab = false;
 	b32 first_char = true;
-#define REPORT_ERROR(code) report_error_line(errors, file.name, file.data + line_offset, code, location, (Range){})
 	while (index < file.len) {
 		if (last_tab) {
-			location.column += 8;
+			state.location.column += 8;
 		} else if (last_not_newline) {
-			location.column++;
+			state.location.column++;
 		} else {
-			location.line++;
-			location.column = 1;
-			line_offset = index;
-			vfile.lines[location.line - 1] = vfile.len;
+			state.location.line++;
+			state.location.column = 1;
+			state.line_offset = index;
+			vfile.lines[state.location.line - 1] = vfile.len;
 		}
 retry:
 		if (index >= file.len) {
@@ -548,19 +528,17 @@ retry:
 		u32 c = file.data[index++];
 		last_not_newline = c != '\n';
 		last_tab = c == '\t';
+		u32 count;
 		if (c == 0xff) {
-			REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
-			while (index < file.len && file.data[index] >> 6 == 2) {
-				index++;
-			}
-			goto retry;
+			count = 5;
+		} else {
+			count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 		}
-		u32 count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 		if (count == 1) {
-			REPORT_ERROR(ERROR_UTF8_UNEXPECTED_CONTINUATION_CHAR);
+			report_utf8_error(&state, ERROR "unexpected continuation byte");
 			goto retry;
 		} else if (count > 4) {
-			REPORT_ERROR(ERROR_UTF8_OVERLONG_SEQUENCE);
+			report_utf8_error(&state, ERROR "sequence too long (> 4 bytes)");
 			while (index < file.len && file.data[index] >> 6 == 2) {
 				index++;
 			}
@@ -574,12 +552,12 @@ retry:
 			chars[0] >>= count;
 			for (u32 i = 1; i < count; i++) {
 				if (index == file.len) {
-					REPORT_ERROR(ERROR_UTF8_EOF_IN_SEQUENCE);
+					report_utf8_error(&state, ERROR "hit EOF while decoding sequence");
 					goto retry;
 				}
 				chars[i] = file.data[index];
 				if ((chars[i] >> 6) != 2) {
-					REPORT_ERROR(ERROR_UTF8_SEQUENCE_TOO_SHORT);
+					report_utf8_error(&state, ERROR "too few continuation bytes in sequence");
 					goto retry;
 				}
 				chars[i] &= 0x7f;
@@ -590,21 +568,21 @@ retry:
 				c |= (u32)chars[i] << (count - i - 1) * 6;
 			}
 			if (first_char && c == 0xfeff) {
-				REPORT_ERROR(ERROR_UTF8_BOM_NOT_ALLOWED);
+				report_utf8_error(&state, ERROR "byte order markers are not permitted");
 				goto retry;
 			}
 			if (c <= 0x7f ||
 			    count > 2 && c <= 0x7ff ||
 			    count > 3 && c <= 0xffff) {
-				REPORT_ERROR(ERROR_UTF8_WRONG_SEQUENCE_LENGTH);
+				report_utf8_error(&state, ERROR "sequence length too long for code point");
 				goto retry;
 			}
 			if (c >= 0xd800 && c <= 0xdfff) {
-				REPORT_ERROR(ERROR_UTF8_SURROGATES_NOT_ALLOWED);
+				report_utf8_error(&state, ERROR "surrogates are not permitted");
 				goto retry;
 			}
 			if (c > 0x10ffff) {
-				REPORT_ERROR(ERROR_UTF8_CODE_POINT_TOO_HIGH);
+				report_utf8_error(&state, ERROR "code point exceeded limit of 0x10ffff");
 				goto retry;
 			}
 			for (u32 i = 0; i < count; i++) {
@@ -613,7 +591,6 @@ retry:
 		}
 		first_char = false;
 	}
-#undef REPORT_ERROR
 	free(file.data);
 	free(file.lines);
 	vfile.data = realloc(vfile.data, vfile.len);
@@ -828,6 +805,14 @@ void print_newline(FormatState *state, Buf *buf, Token *token, Indent *indent) {
 }
 
 internal
+void report_format_error(Lexer *lexer, Location location, char *message, ...) {
+	va_list args;
+	va_start(args, message);
+	vreport_error(lexer->errors, &lexer->file, message, location, (Range){}, args);
+	va_end(args);
+}
+
+internal
 int format_main(int argc, char *argv[static argc]) {
 	SourceFile file;
 	ErrorCount errors;
@@ -844,7 +829,6 @@ int format_main(int argc, char *argv[static argc]) {
 	fmt_state.post_indent_column = 1;
 	Token prev_token = { .type = TOK_UNKNOWN };
 	Token token;
-#define REPORT_ERROR(code, location, ...) report_error(&errors, &file, code, location, (Range){}, ##__VA_ARGS__)
 	Buf output = {};
 	output.cap = file.len;
 	output.data = malloc(output.cap);
@@ -881,18 +865,19 @@ int format_main(int argc, char *argv[static argc]) {
 					match--;
 				}
 				if (fmt_state.len == 1) {
-					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
+					report_format_error(&lexer, token.location, ERROR "extraneous closing bracket");
 					indent = &fmt_state.data[0];
 				} else if (match == 0) {
-					REPORT_ERROR(ERROR_SYN_EXTRA_CLOSING_BRACKET, token.location);
+					report_format_error(&lexer, token.location, ERROR "extraneous closing bracket");
 					indent = &fmt_state.data[fmt_state.len - 1];
 				} else if (match < fmt_state.len - 1) {
 					u8 wanted = fmt_state.data[fmt_state.len - 1].type;
 					u8 open_str[2] = { open_bracket[wanted], 0 };
 					u8 close_str[2] = { close_bracket[wanted], 0 };
-					REPORT_ERROR(ERROR_SYN_EXPECTED, token.location, close_str);
-					REPORT_ERROR(NOTE_SYN_TO_MATCH,
-					             fmt_state.data[fmt_state.len - 1].location, open_str);
+					report_format_error(&lexer, token.location,
+					                    ERROR "expected closing '%0'", close_str);
+					report_format_error(&lexer, fmt_state.data[fmt_state.len - 1].location,
+					                    NOTE "to match this '%0'", open_str);
 					fmt_state.len = match;
 					indent = &fmt_state.data[match];
 					if (type == 2) {
@@ -940,7 +925,6 @@ int format_main(int argc, char *argv[static argc]) {
 		}
 		prev_token = token;
 	}
-#undef REPORT_ERROR
 	// TODO don't free memory that is about to be freed by program exit
 	free(fmt_state.data);
 	if (print_error_summary(errors)) {
