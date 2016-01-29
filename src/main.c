@@ -98,7 +98,7 @@ typedef struct {
 	b32 last_tab;
 	Location location;
 	ErrorCount *errors;
-} LexerState;
+} Lexer;
 
 internal
 void vreport_error_line(ErrorCount *errors, char *file, u8 *line, ErrorCode code, Location location, Range range,
@@ -232,48 +232,48 @@ void report_error(ErrorCount *errors, SourceFile *file, ErrorCode code, Location
 }
 
 internal
-s32 peek(LexerState *state) {
-	if (state->index == state->file.len) {
+s32 peek(Lexer *lexer) {
+	if (lexer->index == lexer->file.len) {
 		return -1;
 	}
-	s32 c = state->file.data[state->index];
+	s32 c = lexer->file.data[lexer->index];
 	u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 	if (seq_len > 0) {
-		u32 index = state->index + 1;
+		u32 index = lexer->index + 1;
 		c &= 0xff >> seq_len;
 		for (u32 i = 0; i < seq_len - 1; i++) {
 			c <<= 6;
-			c |= state->file.data[index++] & 0x7f;
+			c |= lexer->file.data[index++] & 0x7f;
 		}
 	}
 	return c;
 }
 
 internal
-void advance(LexerState *state) {
-	if (state->last_tab) {
-		state->location.column += 8;
-	} else if (state->last_not_newline) {
-		state->location.column++;
+void advance(Lexer *lexer) {
+	if (lexer->last_tab) {
+		lexer->location.column += 8;
+	} else if (lexer->last_not_newline) {
+		lexer->location.column++;
 	} else {
-		state->location.line++;
-		state->location.column = 1;
+		lexer->location.line++;
+		lexer->location.column = 1;
 	}
-	if (state->index < state->file.len) {
-		s32 c = state->file.data[state->index++];
-		state->last_not_newline = c != '\n';
-		state->last_tab = c == '\t';
+	if (lexer->index < lexer->file.len) {
+		s32 c = lexer->file.data[lexer->index++];
+		lexer->last_not_newline = c != '\n';
+		lexer->last_tab = c == '\t';
 		u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 		if (seq_len > 0) {
-			state->index += seq_len - 1;
+			lexer->index += seq_len - 1;
 		}
 	}
 }
 
 internal
-s32 next_char(LexerState *state) {
-	s32 c = peek(state);
-	advance(state);
+s32 next_char(Lexer *lexer) {
+	s32 c = peek(lexer);
+	advance(lexer);
 	return c;
 }
 
@@ -374,74 +374,74 @@ b32 is_bracket(s32 c) {
 }
 
 internal
-void next_token(LexerState *state, Token *token) {
+void next_token(Lexer *lexer, Token *token) {
 	s32 c;
-	token->start = state->file.data + state->index;
-	c = next_char(state);
-	token->len = (u32) (state->file.data + state->index - token->start);
+	token->start = lexer->file.data + lexer->index;
+	c = next_char(lexer);
+	token->len = (u32) (lexer->file.data + lexer->index - token->start);
 	if (c == -1) {
 		token->type = TOK_EOF;
-		token->location = state->location;
+		token->location = lexer->location;
 		return;
 	}
 #define ADD_WHILE(expr) \
-	c = peek(state); \
+	c = peek(lexer); \
 	while (expr) { \
-		advance(state); \
-		c = peek(state); \
+		advance(lexer); \
+		c = peek(lexer); \
 	} \
-	token->len = (u32) (state->file.data + state->index - token->start)
+	token->len = (u32) (lexer->file.data + lexer->index - token->start)
 	if (c == '\n') {
 		token->type = TOK_NEWLINE;
 		ADD_WHILE(c == '\t');
 		ADD_WHILE(c == ' ');
-		token->location = state->location;
+		token->location = lexer->location;
 		if (token->len > 1) {
 			token->location.column = 1;
 		}
 		return;
 	}
-	token->location = state->location;
+	token->location = lexer->location;
 #define REPORT_ERROR(code) \
-	report_error(state->errors, &state->file, code, \
-	             token->location, (Range){token->location, state->location})
+	report_error(lexer->errors, &lexer->file, code, \
+	             token->location, (Range){token->location, lexer->location})
 	if (c == ' ') {
 		token->type = TOK_SPACES;
 		ADD_WHILE(c == ' ');
 		return;
 	}
 	if (c == '/') {
-		s32 next = peek(state);
+		s32 next = peek(lexer);
 		if (next == '/') {
 			token->type = TOK_COMMENT;
 			ADD_WHILE(c != '\n' && c != -1);
 			return;
 		} else if (next == '*') {
 			token->type = TOK_COMMENT;
-			next_char(state);
+			next_char(lexer);
 			u32 depth = 1;
 			while (depth > 0) {
-				c = peek(state);
+				c = peek(lexer);
 				if (c == -1) {
 					REPORT_ERROR(ERROR_LEX_EOF_IN_COMMENT);
 					break;
 				}
-				next_char(state);
+				next_char(lexer);
 				if (c == '/') {
-					next = peek(state);
+					next = peek(lexer);
 					if (next == '*') {
-						advance(state);
+						advance(lexer);
 						depth++;
 					}
 				} else if (c == '*') {
-					next = peek(state);
+					next = peek(lexer);
 					if (next == '/') {
-						advance(state);
+						advance(lexer);
 						depth--;
 					}
 				}
 			}
-			token->len = (u32) (state->file.data + state->index - token->start);
+			token->len = (u32) (lexer->file.data + lexer->index - token->start);
 			return;
 		}
 	}
@@ -461,7 +461,7 @@ void next_token(LexerState *state, Token *token) {
 	if (c == '"') {
 		token->type = TOK_STRING;
 		while (true) {
-			c = peek(state);
+			c = peek(lexer);
 			if (c == -1) {
 				REPORT_ERROR(ERROR_LEX_EOF_IN_STRING);
 				break;
@@ -470,18 +470,18 @@ void next_token(LexerState *state, Token *token) {
 				REPORT_ERROR(ERROR_LEX_UNTERMINATED_STRING);
 				break;
 			}
-			advance(state);
+			advance(lexer);
 			if (c == '"') {
 				break;
 			}
 			if (c == '\\') {
-				c = peek(state);
+				c = peek(lexer);
 				if (c == '"') {
-					advance(state);
+					advance(lexer);
 				}
 			}
 		}
-		token->len = (u32) (state->file.data + state->index - token->start);
+		token->len = (u32) (lexer->file.data + lexer->index - token->start);
 		return;
 	}
 	token->type = TOK_UNKNOWN;
@@ -850,9 +850,9 @@ int format_main(int argc, char *argv[static argc]) {
 	ErrorCount errors;
 	process_common_command_line(argc, argv, &file, &errors);
 
-	LexerState lex_state = {};
-	lex_state.errors = &errors;
-	lex_state.file = file;
+	Lexer lexer = {};
+	lexer.errors = &errors;
+	lexer.file = file;
 	FormatState fmt_state;
 	fmt_state.cap = 8;
 	fmt_state.data = malloc(fmt_state.cap * sizeof(Indent));
@@ -866,7 +866,7 @@ int format_main(int argc, char *argv[static argc]) {
 	output.cap = file.len;
 	output.data = malloc(output.cap);
 	while (token.type != TOK_EOF) {
-		next_token(&lex_state, &token);
+		next_token(&lexer, &token);
 		switch (token.type) {
 		// TODO enforce open brace not on new line. Maybe compress multiple newline tokens?
 		case TOK_BRACKET:
