@@ -601,6 +601,14 @@ retry:
 	return vfile;
 }
 
+// Brackets are mapped to types as follows:
+// '(', ')' => 0
+// '[', ']' => 1
+// '{', '}' => 2
+#define BRACKET_TYPE(c) ((c >> 5) - 1)
+internal u8 open_bracket[]  = { '(', '[', '{' };
+internal u8 close_bracket[] = { ')', ']', '}' };
+
 internal __attribute__((noreturn))
 void die(u8 code) {
 	perror("mepa");
@@ -769,19 +777,12 @@ void buf_push(Buf *buf, u8 c) {
 	buf->data[buf->len++] = c;
 }
 
-// Brackets are mapped to types by (c >> 5) - 1, which gives:
-// '(', ')' => 0
-// '[', ']' => 1
-// '{', '}' => 2
 typedef struct {
 	u32 indent;
 	u32 align;
 	u8 type;
 	Location location;
 } Indent;
-
-internal u8 open_bracket[]  = { '(', '[', '{' };
-internal u8 close_bracket[] = { ')', ']', '}' };
 
 typedef struct {
 	Indent *data;
@@ -845,7 +846,7 @@ int format_main(int argc, char *argv[static argc]) {
 			Indent *indent;
 			assert(token.len == 1);
 			u8 c = *token.start;
-			u8 type = (c >> 5) - 1;
+			u8 type = BRACKET_TYPE(c);
 			if (c == open_bracket[type]) {
 				if (fmt_state.len == fmt_state.cap) {
 					fmt_state.cap += fmt_state.cap >> 1;
