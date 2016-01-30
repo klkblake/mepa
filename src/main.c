@@ -526,6 +526,10 @@ retry:
 			break;
 		}
 		u32 c = file.data[index++];
+		if (c == 0) {
+			report_utf8_error(&state, ERROR "illegal NUL byte");
+			goto retry;
+		}
 		last_not_newline = c != '\n';
 		last_tab = c == '\t';
 		u32 count;
