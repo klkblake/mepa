@@ -623,6 +623,173 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 internal u8 open_bracket[]  = { '(', '[', '{' };
 internal u8 close_bracket[] = { ')', ']', '}' };
 
+internal
+void report_tokenise_error(ErrorCount *errors, SourceFile *file, u32 token_start, u32 token_end, char *message, ...) {
+	va_list args;
+	va_start(args, message);
+	Location start_location = location_for_offset(file, token_start);
+	Location end_location = location_for_offset(file, token_end);
+	vreport_error(errors, file, message, start_location, (Range){start_location, end_location}, args);
+	va_end(args);
+}
+
+// TODO first pass analyses brackets based on formatting to force them to all match up.
+// TODO second pass does a shift-reduce parse with error productions e.g. '(' error ')'
+internal
+SourceFile tokenise(SourceFile file, ErrorCount *errors) {
+#define peek() decode_utf8_codepoint(file.data, index, file.len)
+#define accept() (index += c.len, c.cp = 0, c.len = utf8_codepoint_length(file.data, index, file.len))
+#define next() (index += c.len, peek())
+#define NEXT_TOKEN suppress_illegal_characters = false; continue
+	b32 suppress_illegal_characters = false;
+	u32 index = 0;
+	u32 line_index = 0;
+	u32 bracket_cap = 0;
+	file.token_offsets = malloc((file.len + 1) * sizeof(u32));
+	file.token_offsets[0] = 0;
+	UTF8Codepoint c = peek();
+	if (c.cp == '\t' || c.cp == ' ') {
+		file.token_offsets++;
+		Line *line = &file.lines[0];
+		while (c.cp == '\t') {
+			line->indent++;
+			c = next();
+		}
+		while (c.cp == ' ') {
+			line->align++;
+			c = next();
+		}
+	}
+	while (true) {
+		u32 start = index;
+		file.token_offsets[file.token_count++] = start;
+		if (c.cp == -1) {
+			break;
+		}
+		if (c.cp == '\n') {
+			Line *line = &file.lines[line_index];
+			if (line->bracket_count != bracket_cap) {
+				line->brackets = realloc(line->brackets, line->bracket_count * sizeof(Bracket));
+			}
+			bracket_cap = 0;
+			line = &file.lines[++line_index];
+			c = next();
+			while (c.cp == '\t') {
+				line->indent++;
+				c = next();
+			}
+			while (c.cp == ' ') {
+				line->align++;
+				c = next();
+			}
+			NEXT_TOKEN;
+		}
+		if (c.cp == ' ') {
+			c = next();
+			while (c.cp == ' ') {
+				c = next();
+			}
+			NEXT_TOKEN;
+		}
+		if (c.cp == '"') {
+			while (true) {
+				c = next();
+				if (c.cp == -1) {
+					report_tokenise_error(errors, &file, start, index,
+							      ERROR "hit EOF while looking for end of string");
+					break;
+				}
+				if (c.cp == '\n') {
+					report_tokenise_error(errors, &file, start, index,
+							      ERROR "string was not terminated before end of line");
+					break;
+				}
+				if (c.cp == '"') {
+					c = next();
+					break;
+				}
+				if (c.cp == '\\') {
+					accept();
+					c = next();
+				}
+			}
+			NEXT_TOKEN;
+		}
+		if (c.cp == '/') {
+			c = next();
+			if (c.cp == '/') {
+				c = next();
+				while (c.cp != '\n' && c.cp != -1) {
+					c = next();
+				}
+				NEXT_TOKEN;
+			}
+			if (c.cp == '*') {
+				u32 depth = 1;
+				while (depth > 0) {
+					c = next();
+					if (c.cp == -1) {
+						report_tokenise_error(errors, &file, start, index,
+								      ERROR "hit EOF while looking for end of comment");
+						break;
+					}
+					if (c.cp == '/') {
+						c = next();
+						if (c.cp == '*') {
+							depth++;
+						}
+						c = next();
+					} else if (c.cp == '*') {
+						c = next();
+						if (c.cp == '/') {
+							depth--;
+						}
+						c = next();
+					}
+				}
+				NEXT_TOKEN;
+			}
+		}
+		if (is_bracket(c.cp)) {
+			Line *line = &file.lines[line_index];
+			if (bracket_cap == 0) {
+				bracket_cap = 4;
+				line->brackets = realloc(line->brackets, bracket_cap);
+			} else if (line->bracket_count == bracket_cap) {
+				bracket_cap += bracket_cap >> 1;
+				line->brackets = realloc(line->brackets, bracket_cap);
+			}
+			line->brackets[line->bracket_count++].offset = file.token_offsets[file.token_count - 1];
+			c = next();
+			NEXT_TOKEN;
+		}
+		if (is_start_letter(c.cp)) {
+			c = next();
+			while (is_continue_letter(c.cp)) {
+				c = next();
+			}
+			NEXT_TOKEN;
+		}
+		if (is_symbol(c.cp)) {
+			c = next();
+			while (is_symbol(c.cp)) {
+				c = next();
+			}
+			NEXT_TOKEN;
+		}
+		if (!suppress_illegal_characters) {
+			report_tokenise_error(errors, &file, start, index,
+					      ERROR "illegal character");
+			suppress_illegal_characters = true;
+		}
+	}
+	return file;
+#undef NEXT_TOKEN
+#undef next
+#undef accept
+#undef peek
+}
+
 internal __attribute__((noreturn))
 void die(u8 code) {
 	perror("mepa");
