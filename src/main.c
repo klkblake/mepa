@@ -36,11 +36,26 @@ typedef struct {
 	Location end;
 } Range;
 
+typedef struct Bracket {
+	u32 offset;
+} Bracket;
+
+typedef struct {
+	u32 offset;
+	u32 indent;
+	u32 align;
+	u32 bracket_count;
+	Bracket *brackets;
+} Line;
+
 typedef struct {
 	char *name;
 	u8 *data;
 	u32 len;
-	u32 *lines;
+	u32 line_count;
+	Line *lines;
+	u32 token_count;
+	u32 *token_offsets;
 } SourceFile;
 
 typedef struct {
@@ -168,8 +183,8 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 internal
 void vreport_error(ErrorCount *errors, SourceFile *file, char *message, Location location, Range range,
                    va_list args) {
-	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1], message, location, range,
-	                   args);
+	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1].offset, message, location,
+			   range, args);
 }
 
 internal
@@ -501,7 +516,10 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 		file.name,
 		malloc(file.len),
 		0,
-		malloc(lines * sizeof(u32)),
+		lines,
+		malloc(lines * sizeof(Line)),
+		0,
+		NULL,
 	};
 	UTF8Validator state = {};
 	state.file = file;
@@ -519,7 +537,7 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 			state.location.line++;
 			state.location.column = 1;
 			state.line_offset = index;
-			vfile.lines[state.location.line - 1] = vfile.len;
+			vfile.lines[state.location.line - 1] = (Line){vfile.len, 0, 0, 0, NULL};
 		}
 retry:
 		if (index >= file.len) {
