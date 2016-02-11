@@ -196,6 +196,44 @@ void report_error(ErrorCount *errors, SourceFile *file, char *message, Location 
 }
 
 typedef struct {
+	s32 cp;
+	u32 len;
+} UTF8Codepoint;
+
+internal
+UTF8Codepoint decode_utf8_codepoint(u8 *buf, u32 index, u32 len) {
+	if (index == len) {
+		return (UTF8Codepoint){-1, 0};
+	}
+	UTF8Codepoint c;
+	c.cp = buf[index];
+	c.len = (u32)__builtin_clz((u32)c.cp ^ 0xff) - 24;
+	if (c.len > 0) {
+		c.cp &= 0xff >> c.len;
+		for (u32 i = 1; i < c.len; i++) {
+			c.cp <<= 6;
+			c.cp |= buf[index + i] & 0x7f;
+		}
+	} else {
+		c.len = 1;
+	}
+	return c;
+}
+
+internal
+u32 utf8_codepoint_length(u8 *buf, u32 index, u32 len) {
+	if (index == len) {
+		return 0;
+	}
+	s32 c = buf[index];
+	u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
+	if (seq_len > 0) {
+		return seq_len;
+	}
+	return 1;
+}
+
+typedef struct {
 	SourceFile file;
 	u32 index;
 	b32 last_not_newline;
@@ -206,20 +244,7 @@ typedef struct {
 
 internal
 s32 peek(Lexer *lexer) {
-	if (lexer->index == lexer->file.len) {
-		return -1;
-	}
-	s32 c = lexer->file.data[lexer->index];
-	u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
-	if (seq_len > 0) {
-		u32 index = lexer->index + 1;
-		c &= 0xff >> seq_len;
-		for (u32 i = 0; i < seq_len - 1; i++) {
-			c <<= 6;
-			c |= lexer->file.data[index++] & 0x7f;
-		}
-	}
-	return c;
+	return decode_utf8_codepoint(lexer->file.data, lexer->index, lexer->file.len).cp;
 }
 
 internal
@@ -233,13 +258,10 @@ void advance(Lexer *lexer) {
 		lexer->location.column = 1;
 	}
 	if (lexer->index < lexer->file.len) {
-		s32 c = lexer->file.data[lexer->index++];
+		s32 c = lexer->file.data[lexer->index];
 		lexer->last_not_newline = c != '\n';
 		lexer->last_tab = c == '\t';
-		u32 seq_len = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
-		if (seq_len > 0) {
-			lexer->index += seq_len - 1;
-		}
+		lexer->index += utf8_codepoint_length(lexer->file.data, lexer->index, lexer->file.len);
 	}
 }
 
