@@ -241,9 +241,6 @@ u32 utf8_codepoint_length(u8 *buf, u32 index, u32 len) {
 typedef struct {
 	SourceFile file;
 	u32 index;
-	b32 last_not_newline;
-	b32 last_tab;
-	Location location;
 	ErrorCount *errors;
 } Lexer;
 
@@ -254,18 +251,7 @@ s32 peek(Lexer *lexer) {
 
 internal
 void advance(Lexer *lexer) {
-	if (lexer->last_tab) {
-		lexer->location.column += 8;
-	} else if (lexer->last_not_newline) {
-		lexer->location.column++;
-	} else {
-		lexer->location.line++;
-		lexer->location.column = 1;
-	}
 	if (lexer->index < lexer->file.len) {
-		s32 c = lexer->file.data[lexer->index];
-		lexer->last_not_newline = c != '\n';
-		lexer->last_tab = c == '\t';
 		lexer->index += utf8_codepoint_length(lexer->file.data, lexer->index, lexer->file.len);
 	}
 }
@@ -520,17 +506,16 @@ u32 newline_align(Token *newline) {
 
 typedef struct {
 	SourceFile file;
-	Location location;
 	u32 line_offset;
 	ErrorCount *errors;
 } UTF8Validator;
 
 internal
-void report_utf8_error(UTF8Validator *state, char *message, ...) {
+void report_utf8_error(UTF8Validator *state, u32 offset, char *message, ...) {
 	va_list args;
 	va_start(args, message);
 	vreport_error_line(state->errors, state->file.name, state->file.data + state->line_offset, message,
-	                   state->location, (Range){}, args);
+	                   location_for_offset(&state->file, offset), (Range){}, args);
 	va_end(args);
 }
 
@@ -549,31 +534,17 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 	state.file = file;
 	state.errors = errors;
 	u32 index = 0;
-	b32 last_not_newline = false;
-	b32 last_tab = false;
+	u32 line = 0;
 	b32 first_char = true;
 	while (index < file.len) {
-		if (last_tab) {
-			state.location.column += 8;
-		} else if (last_not_newline) {
-			state.location.column++;
-		} else {
-			state.location.line++;
-			state.location.column = 1;
-			state.line_offset = index;
-			vfile.lines[state.location.line - 1] = (Line){vfile.len, 0, 0, 0, NULL};
-		}
-retry:
-		if (index >= file.len) {
-			break;
-		}
 		u32 c = file.data[index++];
 		if (c == 0) {
-			report_utf8_error(&state, ERROR "illegal NUL byte");
-			goto retry;
+			report_utf8_error(&state, vfile.len, ERROR "illegal NUL byte");
+			continue;
 		}
-		last_not_newline = c != '\n';
-		last_tab = c == '\t';
+		if (c == '\n') {
+			vfile.lines[line++] = (Line){vfile.len + 1, 0, 0, 0, NULL};
+		}
 		u32 count;
 		if (c == 0xff) {
 			count = 5;
@@ -581,14 +552,14 @@ retry:
 			count = (u32)__builtin_clz((u32)c ^ 0xff) - 24;
 		}
 		if (count == 1) {
-			report_utf8_error(&state, ERROR "unexpected continuation byte");
-			goto retry;
+			report_utf8_error(&state, vfile.len, ERROR "unexpected continuation byte");
+			continue;
 		} else if (count > 4) {
-			report_utf8_error(&state, ERROR "sequence too long (> 4 bytes)");
+			report_utf8_error(&state, vfile.len, ERROR "sequence too long (> 4 bytes)");
 			while (index < file.len && file.data[index] >> 6 == 2) {
 				index++;
 			}
-			goto retry;
+			continue;
 		} else if (count == 0) {
 			vfile.data[vfile.len++] = (u8)c;
 		} else {
@@ -598,13 +569,14 @@ retry:
 			chars[0] >>= count;
 			for (u32 i = 1; i < count; i++) {
 				if (index == file.len) {
-					report_utf8_error(&state, ERROR "hit EOF while decoding sequence");
-					goto retry;
+					report_utf8_error(&state, vfile.len, ERROR "hit EOF while decoding sequence");
+					continue;
 				}
 				chars[i] = file.data[index];
 				if ((chars[i] >> 6) != 2) {
-					report_utf8_error(&state, ERROR "too few continuation bytes in sequence");
-					goto retry;
+					report_utf8_error(&state, vfile.len,
+							  ERROR "too few continuation bytes in sequence");
+					continue;
 				}
 				chars[i] &= 0x7f;
 				index++;
@@ -614,22 +586,22 @@ retry:
 				c |= (u32)chars[i] << (count - i - 1) * 6;
 			}
 			if (first_char && c == 0xfeff) {
-				report_utf8_error(&state, ERROR "byte order markers are not permitted");
-				goto retry;
+				report_utf8_error(&state, vfile.len, ERROR "byte order markers are not permitted");
+				continue;
 			}
 			if (c <= 0x7f ||
 			    count > 2 && c <= 0x7ff ||
 			    count > 3 && c <= 0xffff) {
-				report_utf8_error(&state, ERROR "sequence length too long for code point");
-				goto retry;
+				report_utf8_error(&state, vfile.len, ERROR "sequence length too long for code point");
+				continue;
 			}
 			if (c >= 0xd800 && c <= 0xdfff) {
-				report_utf8_error(&state, ERROR "surrogates are not permitted");
-				goto retry;
+				report_utf8_error(&state, vfile.len, ERROR "surrogates are not permitted");
+				continue;
 			}
 			if (c > 0x10ffff) {
-				report_utf8_error(&state, ERROR "code point exceeded limit of 0x10ffff");
-				goto retry;
+				report_utf8_error(&state, vfile.len, ERROR "code point exceeded limit of 0x10ffff");
+				continue;
 			}
 			for (u32 i = 0; i < count; i++) {
 				vfile.data[vfile.len++] = file.data[index - count + i];
