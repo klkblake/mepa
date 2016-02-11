@@ -26,7 +26,7 @@ typedef enum {
 
 typedef struct {
 	TokenType type;
-	Location location;
+	u32 offset;
 	u8 *start;
 	u32 len;
 } Token;
@@ -62,6 +62,21 @@ typedef struct {
 	u32 count;
 	u32 limit;
 } ErrorCount;
+
+internal
+Location location_for_offset(SourceFile *file, u32 offset) {
+	u32 lo = 0;
+	u32 hi = file->line_count - 1;
+	while (lo < hi) {
+		u32 mid = (lo + hi) / 2 + 1;
+		if (file->lines[mid].offset > offset) {
+			hi = mid - 1;
+		} else {
+			lo = mid;
+		}
+	}
+	return (Location){ lo + 1, offset - file->lines[lo].offset + 1 };
+}
 
 #define ERROR "E"
 #define NOTE "N"
@@ -158,11 +173,11 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		col_end = range.end.column - 1;
 	}
 	fputs(TERM_GREEN, stderr);
-	for (u32 i = 0, col = 0; i < size; i++) {
+	for (u32 i = 0; i < size; i++) {
 		u8 c;
-		if (col == location.column - 1) {
+		if (i == location.column - 1) {
 			c = '^';
-		} else if (col_start <= col && col <= col_end) {
+		} else if (col_start <= i && i <= col_end) {
 			c = '~';
 		} else {
 			c = ' ';
@@ -171,10 +186,8 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 			for (u32 k = 0; k < 8; k++) {
 				fputc(c, stderr);
 			}
-			col += 8;
 		} else {
 			fputc(c, stderr);
-			col++;
 		}
 	}
 	fputs(TERM_RESET "\n", stderr);
@@ -185,14 +198,6 @@ void vreport_error(ErrorCount *errors, SourceFile *file, char *message, Location
                    va_list args) {
 	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1].offset, message, location,
 			   range, args);
-}
-
-internal
-void report_error(ErrorCount *errors, SourceFile *file, char *message, Location location, Range range, ...) {
-	va_list args;
-	va_start(args, range);
-	vreport_error(errors, file, message, location, range, args);
-	va_end(args);
 }
 
 typedef struct {
@@ -372,7 +377,9 @@ internal
 void report_lex_error(Lexer *lexer, Token *token, char *message, ...) {
 	va_list args;
 	va_start(args, message);
-	vreport_error(lexer->errors, &lexer->file, message, token->location, (Range){token->location, lexer->location},
+	Location token_location = location_for_offset(&lexer->file, token->offset);
+	Location lexer_location = location_for_offset(&lexer->file, lexer->index);
+	vreport_error(lexer->errors, &lexer->file, message, token_location, (Range){token_location, lexer_location},
 	              args);
 	va_end(args);
 }
@@ -380,12 +387,12 @@ void report_lex_error(Lexer *lexer, Token *token, char *message, ...) {
 internal
 void lexer_next_token(Lexer *lexer, Token *token) {
 	s32 c;
+	token->offset = lexer->index;
 	token->start = lexer->file.data + lexer->index;
 	c = next_char(lexer);
 	token->len = (u32) (lexer->file.data + lexer->index - token->start);
 	if (c == -1) {
 		token->type = TOK_EOF;
-		token->location = lexer->location;
 		return;
 	}
 #define ADD_WHILE(expr) \
@@ -399,13 +406,8 @@ void lexer_next_token(Lexer *lexer, Token *token) {
 		token->type = TOK_NEWLINE;
 		ADD_WHILE(c == '\t');
 		ADD_WHILE(c == ' ');
-		token->location = lexer->location;
-		if (token->len > 1) {
-			token->location.column = 1;
-		}
 		return;
 	}
-	token->location = lexer->location;
 	if (c == ' ') {
 		token->type = TOK_SPACES;
 		ADD_WHILE(c == ' ');
@@ -821,7 +823,7 @@ typedef struct {
 	u32 indent;
 	u32 align;
 	u8 type;
-	Location location;
+	u32 offset;
 } Indent;
 
 typedef struct {
@@ -850,10 +852,10 @@ void print_newline(FormatState *state, Buf *buf, Token *token, Indent *indent) {
 }
 
 internal
-void report_format_error(Lexer *lexer, Location location, char *message, ...) {
+void report_format_error(Lexer *lexer, u32 offset, char *message, ...) {
 	va_list args;
 	va_start(args, message);
-	vreport_error(lexer->errors, &lexer->file, message, location, (Range){}, args);
+	vreport_error(lexer->errors, &lexer->file, message, location_for_offset(&lexer->file, offset), (Range){}, args);
 	va_end(args);
 }
 
@@ -890,12 +892,11 @@ int format_main(int argc, char *argv[static argc]) {
 			if (c == open_bracket[type]) {
 				if (fmt_state.len == fmt_state.cap) {
 					fmt_state.cap += fmt_state.cap >> 1;
-					fmt_state.data = realloc(fmt_state.data,
-					                            fmt_state.cap * sizeof(Indent));
+					fmt_state.data = realloc(fmt_state.data, fmt_state.cap * sizeof(Indent));
 				}
 				indent = &fmt_state.data[fmt_state.len - 1];
 				Indent *new = &fmt_state.data[fmt_state.len++];
-				new->location = token.location;
+				new->offset = token.offset;
 				new->type = type;
 				if (c == '{') {
 					new->indent = indent->indent + 1;
@@ -910,18 +911,18 @@ int format_main(int argc, char *argv[static argc]) {
 					match--;
 				}
 				if (fmt_state.len == 1) {
-					report_format_error(&lexer, token.location, ERROR "extraneous closing bracket");
+					report_format_error(&lexer, token.offset, ERROR "extraneous closing bracket");
 					indent = &fmt_state.data[0];
 				} else if (match == 0) {
-					report_format_error(&lexer, token.location, ERROR "extraneous closing bracket");
+					report_format_error(&lexer, token.offset, ERROR "extraneous closing bracket");
 					indent = &fmt_state.data[fmt_state.len - 1];
 				} else if (match < fmt_state.len - 1) {
 					u8 wanted = fmt_state.data[fmt_state.len - 1].type;
 					u8 open_str[2] = { open_bracket[wanted], 0 };
 					u8 close_str[2] = { close_bracket[wanted], 0 };
-					report_format_error(&lexer, token.location,
+					report_format_error(&lexer, token.offset,
 					                    ERROR "expected closing '%0'", close_str);
-					report_format_error(&lexer, fmt_state.data[fmt_state.len - 1].location,
+					report_format_error(&lexer, fmt_state.data[fmt_state.len - 1].offset,
 					                    NOTE "to match this '%0'", open_str);
 					fmt_state.len = match;
 					indent = &fmt_state.data[match];
