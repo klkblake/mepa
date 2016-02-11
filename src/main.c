@@ -114,7 +114,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		message = next_spec;
 		assert(message + 1 < message_end);
 		u8 c = (u8)message[1];
-		assert('0' <= c && c <= '0');
+		assert('0' <= c && c <= '9');
 		c -= '0';
 		u32 arg_len = (u32)strlen(argv[c]);
 		fwrite(argv[c], 1, arg_len, stderr);
