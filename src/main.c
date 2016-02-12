@@ -31,11 +31,6 @@ typedef struct {
 	u32 len;
 } Token;
 
-typedef struct {
-	Location start;
-	Location end;
-} Range;
-
 typedef struct Bracket {
 	u32 offset;
 } Bracket;
@@ -81,8 +76,8 @@ Location location_for_offset(SourceFile *file, u32 offset) {
 #define ERROR "E"
 #define NOTE "N"
 internal
-void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message, Location location, Range range,
-                        va_list args) {
+void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message, Location location,
+			Location range_start, Location range_end, va_list args) {
 	errors->count++;
 	if (errors->limit && errors->count > errors->limit) {
 		return;
@@ -159,18 +154,18 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 	fputc('\n', stderr);
 	// TODO handle utf-8!
 	// TODO handle invalid utf-8 iff we are reporting a UTF-8 error
-	assert(location.line || !range.start.line && !range.end.line);
-	assert(!range.start.line || range.start.line <= location.line);
-	assert(!range.end.line || range.end.line >= location.line);
+	assert(location.line || !range_start.line && !range_end.line);
+	assert(!range_start.line || range_start.line <= location.line);
+	assert(!range_end.line || range_end.line >= location.line);
 	u32 col_start = 0;
-	if (range.start.line == 0) {
+	if (range_start.line == 0) {
 		col_start = -1u;
-	} else if (range.start.line == location.line) {
-		col_start = range.start.column - 1;
+	} else if (range_start.line == location.line) {
+		col_start = range_start.column - 1;
 	}
 	u32 col_end = num_cols - 1;
-	if (range.end.line == location.line) {
-		col_end = range.end.column - 1;
+	if (range_end.line == location.line) {
+		col_end = range_end.column - 1;
 	}
 	fputs(TERM_GREEN, stderr);
 	for (u32 i = 0; i < size; i++) {
@@ -194,10 +189,10 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 }
 
 internal
-void vreport_error(ErrorCount *errors, SourceFile *file, char *message, Location location, Range range,
-                   va_list args) {
+void vreport_error(ErrorCount *errors, SourceFile *file, char *message, Location location,
+		   Location range_start, Location range_end, va_list args) {
 	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1].offset, message, location,
-			   range, args);
+			   range_start, range_end, args);
 }
 
 typedef struct {
@@ -365,8 +360,7 @@ void report_lex_error(Lexer *lexer, Token *token, char *message, ...) {
 	va_start(args, message);
 	Location token_location = location_for_offset(&lexer->file, token->offset);
 	Location lexer_location = location_for_offset(&lexer->file, lexer->index);
-	vreport_error(lexer->errors, &lexer->file, message, token_location, (Range){token_location, lexer_location},
-	              args);
+	vreport_error(lexer->errors, &lexer->file, message, token_location, token_location, lexer_location, args);
 	va_end(args);
 }
 
@@ -514,8 +508,9 @@ internal
 void report_utf8_error(UTF8Validator *state, u32 offset, char *message, ...) {
 	va_list args;
 	va_start(args, message);
+	Location none = {};
 	vreport_error_line(state->errors, state->file.name, state->file.data + state->line_offset, message,
-	                   location_for_offset(&state->file, offset), (Range){}, args);
+	                   location_for_offset(&state->file, offset), none, none, args);
 	va_end(args);
 }
 
@@ -629,7 +624,7 @@ void report_tokenise_error(ErrorCount *errors, SourceFile *file, u32 token_start
 	va_start(args, message);
 	Location start_location = location_for_offset(file, token_start);
 	Location end_location = location_for_offset(file, token_end);
-	vreport_error(errors, file, message, start_location, (Range){start_location, end_location}, args);
+	vreport_error(errors, file, message, start_location, start_location, end_location, args);
 	va_end(args);
 }
 
@@ -994,7 +989,9 @@ internal
 void report_format_error(Lexer *lexer, u32 offset, char *message, ...) {
 	va_list args;
 	va_start(args, message);
-	vreport_error(lexer->errors, &lexer->file, message, location_for_offset(&lexer->file, offset), (Range){}, args);
+	Location none = {};
+	vreport_error(lexer->errors, &lexer->file, message, location_for_offset(&lexer->file, offset), none, none,
+		      args);
 	va_end(args);
 }
 
