@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <getopt.h>
 #include <errno.h>
 #include <sysexits.h>
@@ -35,6 +36,7 @@ typedef struct {
 } SourceFile;
 
 typedef struct {
+	b32 use_color;
 	u32 count;
 	u32 limit;
 } ErrorCount;
@@ -63,22 +65,29 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 	if (errors->limit && errors->count > errors->limit) {
 		return;
 	}
-	// TODO only use control codes if output is terminal
 	// TODO sort out columns vs characters vs bytes in this function
-#define TERM_RED     "\x1b[1;31m"
-#define TERM_WHITE   "\x1b[1;37m"
-#define TERM_GREEN   "\x1b[1;32m"
-#define TERM_GREY    "\x1b[1;30m"
-#define TERM_MAGENTA "\x1b[1;35m" /* XXX for warnings, when they are added */
-#define TERM_RESET   "\x1b[0m"
+	const char *term_red = "";
+	const char *term_white = "";
+	const char *term_green = "";
+	const char *term_grey = "";
+	const char *term_magenta = ""; // XXX for warnings, when they are added
+	const char *term_reset = "";
+	if (errors->use_color) {
+		term_red = "\x1b[1;31m";
+		term_white = "\x1b[1;37m";
+		term_green = "\x1b[1;32m";
+		term_grey = "\x1b[1;30m";
+		term_magenta = "\x1b[1;35m";
+		term_reset = "\x1b[0m";
+	}
 	u8 *end = rawmemchr((char *)line, '\n');
 	u32 size = (u32) (end - line);
-	fprintf(stderr, TERM_WHITE "%s:%d:%d: ", file, location.line, location.column);
+	fprintf(stderr, "%s%s:%d:%d: ", term_white, file, location.line, location.column);
 	if (message[0] == 'E') {
-		fputs(TERM_RED "error: " TERM_WHITE, stderr);
+		fprintf(stderr, "%serror:%s ", term_red, term_white);
 	} else {
 		assert(message[0] == 'N');
-		fputs(TERM_GREY "note: " TERM_WHITE, stderr);
+		fprintf(stderr, "%snote:%s ", term_grey, term_white);
 	}
 	message++;
 	u32 message_len = (u32)strlen(message);
@@ -111,7 +120,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		fwrite(argv[c], 1, arg_len, stderr);
 		message += 2;
 	}
-	fputs(TERM_RESET "\n", stderr);
+	fprintf(stderr, "%s\n", term_reset);
 	u32 num_cols = 0;
 	for (u32 i = 0; i < size; i++) {
 		// TODO Map C1 codes (code points 0x80-0x9f, utf-8 0xc2 0x80 to 0xc2 9f) to the replacement character
@@ -148,7 +157,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 	if (range_end.line == location.line) {
 		col_end = range_end.column - 1;
 	}
-	fputs(TERM_GREEN, stderr);
+	fputs(term_green, stderr);
 	for (u32 i = 0; i < size; i++) {
 		u8 c;
 		if (i == location.column - 1) {
@@ -166,7 +175,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 			fputc(c, stderr);
 		}
 	}
-	fputs(TERM_RESET "\n", stderr);
+	fprintf(stderr, "%s\n", term_reset);
 }
 
 internal
@@ -622,11 +631,14 @@ internal
 int process_common_command_line(int argc, char *argv[static argc], SourceFile *vfile, ErrorCount *errors) {
 	SourceFile file = {};
 	*errors = (ErrorCount){};
+	errors->use_color = (b32)isatty(STDERR_FILENO);
 	errors->limit = 20;
 
 	const int CODE_ERROR_LIMIT = 256;
+	const int CODE_FORCE_COLOR = 257;
 	struct option longopts[] = {
 		{ "error-limit", required_argument, NULL, CODE_ERROR_LIMIT },
+		{ "force-color", required_argument, NULL, CODE_FORCE_COLOR },
 		{ NULL, 0, NULL, 0 },
 	};
 	int option;
@@ -651,6 +663,22 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 				return EX_USAGE;
 			}
 			errors->limit = (u32)value;
+			break;
+		}
+		case CODE_FORCE_COLOR:
+		{
+			if (*optarg == 0) {
+				fprintf(stderr, "Empty argument to --force-color\n");
+				return EX_USAGE;
+			}
+			if (strcmp(optarg, "on") == 0) {
+				errors->use_color = true;
+			} else if (strcmp(optarg, "off") == 0) {
+				errors->use_color = false;
+			} else {
+				fprintf(stderr, "Argument to --force-color must be \"on\" or \"off\"\n");
+				return EX_USAGE;
+			}
 			break;
 		}
 		case '?': return EX_USAGE;
@@ -834,7 +862,10 @@ internal
 int format_main(int argc, char *argv[static argc]) {
 	SourceFile file;
 	ErrorCount errors;
-	process_common_command_line(argc, argv, &file, &errors);
+	int result = process_common_command_line(argc, argv, &file, &errors);
+	if (result != 0) {
+		return result;
+	}
 
 	file = tokenise(file, &errors);
 	FormatState fmt_state;
