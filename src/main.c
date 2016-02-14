@@ -687,6 +687,7 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 // Many arrays have a 32bit count. We ensure that these do not overflow by
 // restricting the maximum file size to be safe in the worst case.
 // If the file size is N, then the worst case values are:
+// read buffer: N + 1 (we have to get a short read to ensure we have found the end)
 // lines: N + 1
 // tokens: N + 1
 // brackets: N (our current balancing algorithm only deletes brackets)
@@ -777,9 +778,11 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 		}
 		rewind(file_stream);
 	}
+	// We have to read one past the end to ensure that the file hasn't
+	// changed size during the read
 	u32 cap;
 	if (estimate != -1) {
-		cap = estimate > 8 ? (u32)estimate : 8;
+		cap = estimate > 8 ? (u32)estimate + 1 : 8;
 	} else {
 		cap = 4096;
 	}
@@ -787,7 +790,7 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	u32 histo[256] = {};
 	while (true) {
 		u32 wanted = cap - file.len;
-		usize result = fread(file.data + file.len, 1, wanted, file_stream);
+		u32 result = (u32)fread(file.data + file.len, 1, wanted, file_stream);
 		b32 done = false;
 		if (result != wanted) {
 			if (ferror(file_stream)) {
@@ -800,14 +803,17 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 			histo[file.data[i]]++;
 		}
 		file.len += result;
+		if (file.len > MAX_FILE_SIZE) {
+			goto error_file_size;
+		}
 		if (done) {
 			break;
 		}
-		u64 newcap = cap + (cap >> 1);
-		if (newcap > MAX_FILE_SIZE) {
-			newcap = MAX_FILE_SIZE;
+		u64 newcap = (u64)cap + (cap >> 1);
+		if (newcap > MAX_FILE_SIZE + 1) {
+			newcap = MAX_FILE_SIZE + 1;
 		}
-		if (cap == MAX_FILE_SIZE) {
+		if (cap == MAX_FILE_SIZE + 1) {
 			goto error_file_size;
 		}
 		cap = (u32)newcap;
