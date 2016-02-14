@@ -22,18 +22,18 @@ typedef struct {
 	u32 offset;
 	u32 indent;
 	u32 align;
-	u32 bracket_count;
-	Bracket *brackets;
 } Line;
 
 typedef struct {
 	char *name;
 	u8 *data;
 	u32 len;
-	u32 line_count;
-	Line *lines;
 	u32 token_count;
 	u32 *token_offsets;
+	u32 line_count;
+	Line *lines;
+	u32 bracket_count;
+	Bracket *brackets;
 } SourceFile;
 
 typedef struct {
@@ -206,15 +206,9 @@ void report_utf8_error(UTF8Validator *state, u32 offset, char *message, ...) {
 
 internal
 SourceFile validate_utf8(SourceFile file, ErrorCount *errors) {
-	SourceFile vfile = {
-		file.name,
-		malloc(file.len),
-		0,
-		file.line_count,
-		file.lines,
-		0,
-		NULL,
-	};
+	SourceFile vfile = file;
+	vfile.data = malloc(file.len);
+	vfile.len = 0;
 	vfile.lines[0] = (Line){};
 	UTF8Validator state = {};
 	state.file = file;
@@ -229,7 +223,7 @@ SourceFile validate_utf8(SourceFile file, ErrorCount *errors) {
 			continue;
 		}
 		if (c == '\n') {
-			vfile.lines[++line] = (Line){vfile.len + 1, 0, 0, 0, NULL};
+			vfile.lines[++line] = (Line){vfile.len + 1, 0, 0};
 		}
 		u32 count;
 		if (c == 0xff) {
@@ -463,7 +457,7 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 	b32 suppress_illegal_characters = false;
 	u32 index = 0;
 	u32 line_index = 0;
-	u32 bracket_cap = 0;
+	u32 bracket_index = 0;
 	file.token_offsets = malloc((file.len + 1) * sizeof(u32));
 	file.token_offsets[0] = 0;
 	UTF8Codepoint c = peek();
@@ -486,12 +480,7 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 			break;
 		}
 		if (c.cp == '\n') {
-			Line *line = &file.lines[line_index];
-			if (line->bracket_count != bracket_cap) {
-				line->brackets = realloc(line->brackets, line->bracket_count * sizeof(Bracket));
-			}
-			bracket_cap = 0;
-			line = &file.lines[++line_index];
+			Line *line = &file.lines[++line_index];
 			c = next();
 			while (c.cp == '\t') {
 				line->indent++;
@@ -574,18 +563,7 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 			NEXT_TOKEN;
 		}
 		if (is_bracket(c.cp)) {
-			// TODO store brackets in one array, not per line
-			Line *line = &file.lines[line_index];
-			if (bracket_cap == 0) {
-				bracket_cap = 4;
-				line->brackets = realloc(line->brackets, bracket_cap * sizeof(Bracket));
-			} else if (line->bracket_count == bracket_cap) {
-				bracket_cap += bracket_cap >> 1;
-				line->brackets = realloc(line->brackets, bracket_cap * sizeof(Bracket));
-			}
-			Bracket *bracket = &line->brackets[line->bracket_count++];
-			bracket->offset = start;
-			bracket->c = (u8)c.cp;
+			file.brackets[bracket_index++] = (Bracket){start, (u8)c.cp};
 			c = next();
 			NEXT_TOKEN;
 		}
@@ -629,55 +607,44 @@ void report_bracket_error(ErrorCount *errors, SourceFile *file, u32 offset, char
 
 internal
 void balance_brackets(SourceFile file, ErrorCount *errors) {
-	typedef struct {
-		Line *line;
-		Bracket *bracket;
-	} LineBracket;
 	u32 bracket_count = 0;
 	u32 bracket_cap = 8;
-	LineBracket *brackets = malloc(bracket_cap * sizeof(LineBracket));
+	Bracket **brackets = malloc(bracket_cap * sizeof(Bracket *));
 	// TODO optionally use formatting information
 	// TODO use better correction algorithm
-	for (u32 line_index = 0; line_index < file.line_count; line_index++) {
-		Line *line = &file.lines[line_index];
-		for (u32 bracket_index = 0; bracket_index < line->bracket_count; bracket_index++) {
-			Bracket *bracket = &line->brackets[bracket_index];
-			u8 type = BRACKET_TYPE(bracket->c);
-			if (bracket->c == open_bracket[type]) {
-				if (bracket_count == bracket_cap) {
-					bracket_cap += bracket_cap >> 1;
-					brackets = realloc(brackets, bracket_cap * sizeof(LineBracket));
+	for (u32 index = 0; index < file.bracket_count; index++) {
+		Bracket *bracket = &file.brackets[index];
+		u8 type = BRACKET_TYPE(bracket->c);
+		if (bracket->c == open_bracket[type]) {
+			if (bracket_count == bracket_cap) {
+				bracket_cap += bracket_cap >> 1;
+				brackets = realloc(brackets, bracket_cap * sizeof(Bracket *));
+			}
+			brackets[bracket_count++] = bracket;
+		} else {
+			s32 match = (s32)bracket_count - 1;
+			while (match >= 0 && BRACKET_TYPE(brackets[match]->c) != type) {
+				match--;
+			}
+			if (match == -1 || bracket_count == 0) {
+				report_bracket_error(errors, &file, bracket->offset,
+				                     ERROR "extraneous closing bracket");
+				bracket->c = 0;
+			} else if ((u32)match < bracket_count - 1) {
+				Bracket *top = brackets[bracket_count - 1];
+				u8 wanted = BRACKET_TYPE(top->c);
+				u8 open_str[2] = { open_bracket[wanted], 0 };
+				u8 close_str[2] = { close_bracket[wanted], 0 };
+				report_bracket_error(errors, &file, bracket->offset,
+				                     ERROR "expected closing '%0'", close_str);
+				report_bracket_error(errors, &file, top->offset,
+				                     NOTE "to match this '%0'", open_str);
+				for (u32 i = (u32)match + 1; i < bracket_count; i++) {
+					brackets[i]->c = 0;
 				}
-				brackets[bracket_count++] = (LineBracket){line, bracket};
+				bracket_count = (u32)match;
 			} else {
-				s32 match;
-				for (match = (s32)bracket_count - 1; match >= 0; match--) {
-					LineBracket lb = brackets[match];
-					if (BRACKET_TYPE(lb.bracket->c) == type) {
-						break;
-					}
-				}
-				if (match == -1 || bracket_count == 0) {
-					report_bracket_error(errors, &file, bracket->offset,
-					                     ERROR "extraneous closing bracket");
-					line->brackets[bracket_index].c = 0;
-				} else if ((u32)match < bracket_count - 1) {
-					LineBracket top = brackets[bracket_count - 1];
-					u8 wanted = BRACKET_TYPE(top.bracket->c);
-					u8 open_str[2] = { open_bracket[wanted], 0 };
-					u8 close_str[2] = { close_bracket[wanted], 0 };
-					report_bracket_error(errors, &file, bracket->offset,
-					                     ERROR "expected closing '%0'", close_str);
-					report_bracket_error(errors, &file, top.bracket->offset,
-					                     NOTE "to match this '%0'", open_str);
-					for (u32 i = (u32)match + 1; i < bracket_count; i++) {
-						LineBracket lb = brackets[i];
-						lb.bracket->c = 0;
-					}
-					bracket_count = (u32)match;
-				} else {
-					bracket_count--;
-				}
+				bracket_count--;
 			}
 		}
 	}
@@ -840,6 +807,8 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	}
 	file.line_count = histo['\n'] + 1; // Add a line for the EOF
 	file.lines = malloc(file.line_count * sizeof(Line));
+	file.bracket_count = histo['('] + histo[')'] + histo['['] + histo[']'] + histo['{'] + histo['}'];
+	file.brackets = malloc(file.bracket_count * sizeof(Bracket));
 	*vfile = validate_utf8(file, errors);
 	return 0;
 
@@ -954,7 +923,6 @@ int format_main(int argc, char *argv[static argc]) {
 	u8 token_first = 0;
 	u32 token_len = 0;
 	u32 index = 0;
-	u32 line_index = 0;
 	u32 bracket_index = 0;
 	{
 		// Skip indent on first line
@@ -986,8 +954,7 @@ int format_main(int argc, char *argv[static argc]) {
 		case '{':
 		case '}':
 		{
-			Line *line = &file.lines[line_index];
-			if (line->brackets[bracket_index++].c == 0) {
+			if (file.brackets[bracket_index++].c == 0) {
 				goto ignore_bracket;
 			}
 			Indent *indent;
@@ -1028,8 +995,6 @@ int format_main(int argc, char *argv[static argc]) {
 				print_newline(&fmt_state, &output, prev_token_offset, prev_token_len,
 				              &fmt_state.data[0]);
 			}
-			line_index++;
-			bracket_index = 0;
 			break;
 		}
 		default:
