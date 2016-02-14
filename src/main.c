@@ -203,13 +203,13 @@ void report_utf8_error(UTF8Validator *state, u32 offset, char *message, ...) {
 }
 
 internal
-SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
+SourceFile validate_utf8(SourceFile file, ErrorCount *errors) {
 	SourceFile vfile = {
 		file.name,
 		malloc(file.len),
 		0,
-		lines,
-		malloc(lines * sizeof(Line)),
+		file.line_count,
+		file.lines,
 		0,
 		NULL,
 	};
@@ -294,7 +294,6 @@ SourceFile validate_utf8(SourceFile file, u32 lines, ErrorCount *errors) {
 		first_char = false;
 	}
 	free(file.data);
-	free(file.lines);
 	vfile.data = realloc(vfile.data, vfile.len);
 	return vfile;
 }
@@ -573,6 +572,7 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 			NEXT_TOKEN;
 		}
 		if (is_bracket(c.cp)) {
+			// TODO store brackets in one array, not per line
 			Line *line = &file.lines[line_index];
 			if (bracket_cap == 0) {
 				bracket_cap = 4;
@@ -783,7 +783,7 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 		cap = 4096;
 	}
 	file.data = malloc(cap);
-	u32 lines = 0;
+	u32 histo[256] = {};
 	while (true) {
 		u32 wanted = cap - file.len;
 		usize result = fread(file.data + file.len, 1, wanted, file_stream);
@@ -795,9 +795,7 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 			done = true;
 		}
 		for (u32 i = file.len; i < file.len + result; i++) {
-			if (file.data[i] == '\n') {
-				lines++;
-			}
+			histo[file.data[i]]++;
 		}
 		file.len += result;
 		if (done) {
@@ -823,13 +821,13 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	if (file.data[file.len - 1] != '\n') {
 		file.data = realloc(file.data, file.len + 1);
 		file.data[file.len++] = '\n';
-		lines++;
+		histo['\n']++;
 	} else {
 		file.data = realloc(file.data, file.len);
 	}
-	// Add a line for the EOF
-	lines++;
-	*vfile = validate_utf8(file, lines, errors);
+	file.line_count = histo['\n'] + 1; // Add a line for the EOF
+	file.lines = malloc(file.line_count * sizeof(Line));
+	*vfile = validate_utf8(file, errors);
 	return 0;
 }
 
