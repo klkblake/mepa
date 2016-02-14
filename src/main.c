@@ -682,20 +682,6 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 	free(brackets);
 }
 
-internal __attribute__((noreturn))
-void die(u8 code) {
-	perror("mepa");
-	exit(code);
-}
-
-internal
-void *nonnull_or_die(void *ptr, u8 code) {
-	if (ptr == NULL) {
-		die(code);
-	}
-	return ptr;
-}
-
 internal
 int process_common_command_line(int argc, char *argv[static argc], SourceFile *vfile, ErrorCount *errors) {
 	SourceFile file = {};
@@ -759,11 +745,15 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	}
 	FILE *file_stream;
 	if (optind == argc || strcmp(argv[optind], "-") == 0) {
-		file_stream = stdin;
 		file.name = "<stdin>";
+		file_stream = stdin;
 	} else {
-		file_stream = nonnull_or_die(fopen(argv[optind], "r"), EX_NOINPUT);
 		file.name = argv[optind];
+		file_stream = fopen(file.name, "r");
+		if (file_stream == NULL) {
+			perror(file.name);
+			return EX_NOINPUT;
+		}
 	}
 	s64 estimate = -1;
 	if (fseek(file_stream, 0, SEEK_END) == 0) {
@@ -790,7 +780,8 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 		b32 done = false;
 		if (result != wanted) {
 			if (ferror(file_stream)) {
-				die(EX_NOINPUT);
+				perror(file.name);
+				return EX_NOINPUT;
 			}
 			done = true;
 		}
