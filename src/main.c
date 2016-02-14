@@ -62,7 +62,9 @@ Location location_for_offset(SourceFile *file, u32 offset) {
 internal
 void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message, Location location,
                         Location range_start, Location range_end, va_list args) {
-	errors->count++;
+	if (errors->count < -1u) {
+		errors->count++;
+	}
 	if (errors->limit && errors->count > errors->limit) {
 		return;
 	}
@@ -682,6 +684,16 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 	free(brackets);
 }
 
+// Many arrays have a 32bit count. We ensure that these do not overflow by
+// restricting the maximum file size to be safe in the worst case.
+// If the file size is N, then the worst case values are:
+// lines: N + 1
+// tokens: N + 1
+// brackets: N (our current balancing algorithm only deletes brackets)
+// errors: N * num_passes (we cap this, so it does not contribute)
+#define MAX_FILE_SIZE -2u
+#define MAX_FILE_SIZE_STR "4GB - 2"
+
 internal
 int process_common_command_line(int argc, char *argv[static argc], SourceFile *vfile, ErrorCount *errors) {
 	SourceFile file = {};
@@ -759,9 +771,8 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	if (fseek(file_stream, 0, SEEK_END) == 0) {
 		estimate = ftell(file_stream);
 		if (estimate != -1) {
-			if (estimate >= -1u) {
-				fprintf(stderr, "%s exceeds maximum file size of 4GB - 1\n", file.name);
-				return EX_DATAERR;
+			if (estimate > MAX_FILE_SIZE) {
+				goto error_file_size;
 			}
 		}
 		rewind(file_stream);
@@ -792,13 +803,14 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 		if (done) {
 			break;
 		}
-		u32 newcap = cap + (cap >> 1);
-		// Ensure that we fit within a u32 even if we need to add a final newline
-		if (newcap < cap || newcap == -1u) {
-			fprintf(stderr, "%s exceeds maximum file size of 4GB - 1\n", file.name);
-			return EX_DATAERR;
+		u64 newcap = cap + (cap >> 1);
+		if (newcap > MAX_FILE_SIZE) {
+			newcap = MAX_FILE_SIZE;
 		}
-		cap = newcap;
+		if (cap == MAX_FILE_SIZE) {
+			goto error_file_size;
+		}
+		cap = (u32)newcap;
 		file.data = realloc(file.data, cap);
 	}
 	fclose(file_stream);
@@ -810,6 +822,10 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 		return EX_IOERR;
 	}
 	if (file.data[file.len - 1] != '\n') {
+		fprintf(stderr, "%s is missing the trailing newline on the last line, adding...", file.name);
+		if (file.len == MAX_FILE_SIZE) {
+			goto error_file_size;
+		}
 		file.data = realloc(file.data, file.len + 1);
 		file.data[file.len++] = '\n';
 		histo['\n']++;
@@ -820,6 +836,10 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	file.lines = malloc(file.line_count * sizeof(Line));
 	*vfile = validate_utf8(file, errors);
 	return 0;
+
+error_file_size:
+	fprintf(stderr, "%s exceeds maximum file size of " MAX_FILE_SIZE_STR "\n", file.name);
+	return EX_DATAERR;
 }
 
 internal
