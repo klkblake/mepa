@@ -62,7 +62,7 @@ Location location_for_offset(SourceFile *file, u32 offset) {
 internal
 void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message, Location location,
                         Location range_start, Location range_end, va_list args) {
-	if (errors->count < -1u) {
+	if (message[0] != 'N' && errors->count < -1u) {
 		errors->count++;
 	}
 	if (errors->limit && errors->count > errors->limit) {
@@ -204,6 +204,7 @@ void report_utf8_error(UTF8Validator *state, u32 offset, char *message, ...) {
 	va_end(args);
 }
 
+// TODO unicode normalisation
 internal
 SourceFile validate_utf8(SourceFile file, ErrorCount *errors) {
 	SourceFile vfile = file;
@@ -633,14 +634,21 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 			} else if ((u32)match < bracket_count - 1) {
 				Bracket *top = brackets[bracket_count - 1];
 				u8 wanted = BRACKET_TYPE(top->c);
-				u8 open_str[2] = { open_bracket[wanted], 0 };
-				u8 close_str[2] = { close_bracket[wanted], 0 };
+				u8 open_str[] = { open_bracket[wanted], 0 };
+				u8 close_str[] = { close_bracket[wanted], 0 };
 				report_bracket_error(errors, &file, bracket->offset,
 				                     ERROR "expected closing '%0'", close_str);
 				report_bracket_error(errors, &file, top->offset,
 				                     NOTE "to match this '%0'", open_str);
-				for (u32 i = (u32)match + 1; i < bracket_count; i++) {
-					brackets[i]->c = 0;
+				if ((u32)match + 1 != bracket_count - 1) {
+					for (u32 i = bracket_count - 1; i > (u32)match; i--) {
+						u8 bstr[] = { brackets[i]->c, 0 };
+						report_bracket_error(errors, &file, brackets[i]->offset,
+						                     NOTE "deleting unclosed bracket '%0'", bstr);
+						brackets[i]->c = 0;
+					}
+				} else {
+					brackets[match + 1]->c = 0;
 				}
 				bracket_count = (u32)match;
 			} else {
@@ -819,7 +827,10 @@ error_file_size:
 
 internal
 b32 print_error_summary(ErrorCount errors) {
-	if (errors.count > 0) {
+	if (errors.count == 1) {
+		fprintf(stderr, "1 error\n");
+		return true;
+	} else if (errors.count > 0) {
 		if (!errors.limit || errors.count <= errors.limit) {
 			fprintf(stderr, "%u errors\n", errors.count);
 		} else {
