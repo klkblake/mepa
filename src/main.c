@@ -38,6 +38,7 @@ typedef struct {
 
 typedef struct {
 	b32 use_color;
+	b32 fatal;
 	u32 count;
 	u32 limit;
 } ErrorCount;
@@ -64,6 +65,9 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
                         Location range_start, Location range_end, va_list args) {
 	if (message[0] != 'N' && errors->count < -1u) {
 		errors->count++;
+		if (errors->limit && errors->count == errors->limit) {
+			errors->fatal = true;
+		}
 	}
 	if (errors->limit && errors->count > errors->limit) {
 		return;
@@ -818,6 +822,9 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	file.bracket_count = histo['('] + histo[')'] + histo['['] + histo[']'] + histo['{'] + histo['}'];
 	file.brackets = malloc(file.bracket_count * sizeof(Bracket));
 	*vfile = validate_utf8(file, errors);
+	if (errors->fatal) {
+		return 1;
+	}
 	return 0;
 
 error_file_size:
@@ -918,7 +925,13 @@ int format_main(int argc, char *argv[static argc]) {
 		return result;
 	}
 	file = tokenise(file, &errors);
+	if (errors.fatal) {
+		return 1;
+	}
 	balance_brackets(file, &errors);
+	if (errors.fatal) {
+		return 1;
+	}
 
 	FormatState fmt_state;
 	fmt_state.cap = 8;
