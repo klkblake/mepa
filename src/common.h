@@ -18,7 +18,8 @@ typedef __UINT64_TYPE__ u64;
 typedef double f64;
 
 typedef _Bool b1;
-typedef u32  b32;
+typedef u16   b16;
+typedef u32   b32;
 
 typedef __SIZE_TYPE__  usize;
 typedef s64 ssize;

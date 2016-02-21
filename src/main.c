@@ -675,23 +675,23 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 	free(brackets);
 }
 
-#define NONTERM_BIT (1u << 31)
-#define TOK_NONE        -1u
-#define TOK_EOF         0
-#define TOK_COMMENT     1
-#define TOK_SPACES      2
-#define TOK_NEWLINE     3
-#define TOK_STRING      4
-#define TOK_NUMBER      5
-#define TOK_LPAREN      6
-#define TOK_RPAREN      7
-#define TOK_LBRACKET    8
-#define TOK_RBRACKET    9
-#define TOK_LBRACE      10
-#define TOK_RBRACE      11
-#define TOK_SYMBOL      12
-#define TOK_IDENT       13
-#define TOK_EXTRA_BASE  14
+#define NONTERM_BIT    (1u << 15)
+#define TOK_NONE       ((u16)-1u)
+#define TOK_EOF        0
+#define TOK_COMMENT    1
+#define TOK_SPACES     2
+#define TOK_NEWLINE    3
+#define TOK_STRING     4
+#define TOK_NUMBER     5
+#define TOK_LPAREN     6
+#define TOK_RPAREN     7
+#define TOK_LBRACKET   8
+#define TOK_RBRACKET   9
+#define TOK_LBRACE     10
+#define TOK_RBRACE     11
+#define TOK_SYMBOL     12
+#define TOK_IDENT      13
+#define TOK_EXTRA_BASE 14
 
 internal
 char *token_strings[] = {
@@ -711,11 +711,10 @@ char *token_strings[] = {
 	"<ident>",
 };
 
-// TODO can we store these with u16s?
 // Nonterminal if NONTERM_BIT is set, terminal otherwise
 typedef struct {
-	u32 first;
-	u32 second;
+	u16 first; // TODO check for overflow when adding rules
+	u16 second;
 	u32 offset_start;
 	u32 offset_end;
 } Rule;
@@ -731,7 +730,7 @@ typedef struct {
 // count followed by a series of records. Each record corresponds to a rule,
 // and is composed of the set of terminals that trigger that rule. The last
 // terminal is marked with END_BIT.
-#define END_BIT (1u << 31)
+#define END_BIT (1u << 15)
 
 #define BITSET_WORD_SIZE (sizeof(u64) * 8)
 
@@ -822,7 +821,7 @@ void print_first_set_table(Parser *parser) {
 }
 
 internal
-void print_parse_table(Parser *parser, u32 *table) {
+void print_parse_table(Parser *parser, u16 *table) {
 	fprintf(stderr, "Parse table:\n");
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
 		fprintf(stderr, "Rule set %u %s:\n", i, parser->rulesets[i].nonterminal);
@@ -964,12 +963,12 @@ void regen_parse_table(Parser *parser) {
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
 		parse_table_size += 1 + bitset_popcount(bitset_width, first_set_table[i]);
 	}
-	u32 *parse_table = malloc(parse_table_size * sizeof(u32));
+	u16 *parse_table = malloc(parse_table_size * sizeof(u16));
 	u64 *used_first_set = malloc(bitset_width * sizeof(u64));
 	u32 cursor = 0;
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
 		parse_table_index[i] = cursor;
-		parse_table[cursor++] = bitset_popcount(bitset_width, first_set_table[i]);
+		parse_table[cursor++] = (u16)bitset_popcount(bitset_width, first_set_table[i]);
 		memset(used_first_set, 0, bitset_width * sizeof(u64));
 		RuleSet *rs = &parser->rulesets[i];
 		u32 count = rs->count;
@@ -1020,11 +1019,11 @@ void regen_parse_table(Parser *parser) {
 						u32 next_token_offset = (u32)__builtin_ffsl((s64)word) - 1;
 						word >>= next_token_offset + 1;
 						word <<= next_token_offset + 1;
-						parse_table[cursor++] = k * BITSET_WORD_SIZE + next_token_offset;
+						parse_table[cursor++] = (u16)(k * BITSET_WORD_SIZE + next_token_offset);
 					}
 				}
 			} else {
-				parse_table[cursor++] = first;
+				parse_table[cursor++] = (u16)first;
 			}
 			parse_table[cursor - 1] |= END_BIT;
 		}
