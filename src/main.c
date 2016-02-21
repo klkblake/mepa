@@ -45,6 +45,9 @@ typedef struct {
 
 internal
 Location location_for_offset(SourceFile *file, u32 offset) {
+	if (offset == -1u) {
+		return (Location){};
+	}
 	u32 lo = 0;
 	u32 hi = file->line_count - 1;
 	while (lo < hi) {
@@ -87,8 +90,6 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		term_magenta = "\x1b[1;35m";
 		term_reset = "\x1b[0m";
 	}
-	u8 *end = rawmemchr((char *)line, '\n');
-	u32 size = (u32) (end - line);
 	fprintf(stderr, "%s%s:%d:%d: ", term_white, file, location.line, location.column);
 	if (message[0] == 'E') {
 		fprintf(stderr, "%serror:%s ", term_red, term_white);
@@ -128,6 +129,11 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		message += 2;
 	}
 	fprintf(stderr, "%s\n", term_reset);
+	if (!line) {
+		return;
+	}
+	u8 *end = rawmemchr((char *)line, '\n');
+	u32 size = (u32) (end - line);
 	u32 num_cols = 0;
 	for (u32 i = 0; i < size; i++) {
 		// TODO Map C1 codes (code points 0x80-0x9f, utf-8 0xc2 0x80 to 0xc2 9f) to the replacement character
@@ -188,8 +194,12 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 internal
 void vreport_error(ErrorCount *errors, SourceFile *file, char *message, Location location,
                    Location range_start, Location range_end, va_list args) {
-	vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1].offset, message, location,
-	                   range_start, range_end, args);
+	if (location.line) {
+		vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1].offset, message,
+		                   location, range_start, range_end, args);
+	} else {
+		vreport_error_line(errors, file->name, NULL, message, location, range_start, range_end, args);
+	}
 }
 
 typedef struct {
@@ -665,6 +675,416 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 	free(brackets);
 }
 
+#define NONTERM_BIT (1u << 31)
+#define TOK_NONE        -1u
+#define TOK_EOF         0
+#define TOK_COMMENT     1
+#define TOK_SPACES      2
+#define TOK_NEWLINE     3
+#define TOK_STRING      4
+#define TOK_NUMBER      5
+#define TOK_LPAREN      6
+#define TOK_RPAREN      7
+#define TOK_LBRACKET    8
+#define TOK_RBRACKET    9
+#define TOK_LBRACE      10
+#define TOK_RBRACE      11
+#define TOK_SYMBOL      12
+#define TOK_IDENT       13
+#define TOK_EXTRA_BASE  14
+
+internal
+char *token_strings[] = {
+	"<EOF>",
+	"<comment>",
+	"<spaces>",
+	"<newline>",
+	"<string>",
+	"<number>",
+	"'('",
+	"')'",
+	"'['",
+	"']'",
+	"'{'",
+	"'}'",
+	"<symbol>",
+	"<ident>",
+};
+
+// TODO can we store these with u16s?
+// Nonterminal if NONTERM_BIT is set, terminal otherwise
+typedef struct {
+	u32 first;
+	u32 second;
+	u32 offset_start;
+	u32 offset_end;
+} Rule;
+
+typedef struct {
+	char *nonterminal;
+	u32 next;
+	u32 count; // only used in first block
+	Rule rules[3];
+} RuleSet;
+
+// The parser table consists of one entry for each rule set. Each entry is a
+// count followed by a series of records. Each record corresponds to a rule,
+// and is composed of the set of terminals that trigger that rule. The last
+// terminal is marked with END_BIT.
+#define END_BIT (1u << 31)
+
+#define BITSET_WORD_SIZE (sizeof(u64) * 8)
+
+typedef struct {
+	SourceFile *file;
+	ErrorCount *errors;
+
+	u32 extra_token_count;
+	char **extra_tokens;
+	char **extra_token_strings;
+	u32 ruleset_count;
+	RuleSet *rulesets;
+	u32 extra_block_count;
+	RuleSet *extra_blocks;
+	u32 bitset_width;
+	u64 *first_set_table;
+} Parser;
+#define FIRST_SET_TABLE(parser) ((u64 (*)[(parser)->bitset_width])(parser)->first_set_table)
+
+internal
+char *token_to_string(u32 token, char *extra_token_strings[]) {
+	if (token < TOK_EXTRA_BASE) {
+		return token_strings[token];
+	} else {
+		return extra_token_strings[token - TOK_EXTRA_BASE];
+	}
+}
+
+internal
+char *symbol_to_string(Parser *parser, u32 symbol) {
+	if ((symbol & NONTERM_BIT) != 0) {
+		symbol &= ~NONTERM_BIT;
+		return parser->rulesets[symbol].nonterminal;
+	} else {
+		return token_to_string(symbol, parser->extra_token_strings);
+	}
+}
+
+internal
+void print_parse_rules(Parser *parser) {
+	fprintf(stderr, "Parse rules:\n");
+	for (u32 i = 0; i < parser->ruleset_count; i++) {
+		fprintf(stderr, "Rule set %u %s:\n", i, parser->rulesets[i].nonterminal);
+		RuleSet *rs = &parser->rulesets[i];
+		u32 count = rs->count;
+		for (u32 j = 0, rule_idx = 0; j < count; j++, rule_idx++) {
+			fprintf(stderr, "  Rule %u: ", rule_idx);
+			if (j == array_count(rs->rules)) {
+				j = 0;
+				count -= array_count(rs->rules);
+				rs = &parser->extra_blocks[rs->next];
+			}
+			Rule rule = rs->rules[j];
+			fprintf(stderr, "%s", symbol_to_string(parser, rule.first));
+			if (rule.second != TOK_NONE) {
+				fprintf(stderr, ", %s", symbol_to_string(parser, rule.second));
+			}
+			fprintf(stderr, "\n");
+		}
+		fprintf(stderr, "\n");
+	}
+	fprintf(stderr, "\n");
+}
+
+internal
+void print_first_set_table(Parser *parser) {
+	fprintf(stderr, "First sets:\n");
+	for (u32 i = 0; i < parser->ruleset_count; i++) {
+		fprintf(stderr, "Rule set %u %s: ", i, parser->rulesets[i].nonterminal);
+		u32 token = 0;
+		b32 first = true;
+		for (u32 j = 0; j < parser->bitset_width; j++) {
+			u64 word = FIRST_SET_TABLE(parser)[i][j];
+			for (u32 k = 0; k < BITSET_WORD_SIZE; k++, token++) {
+				if (word >> k & 0x1) {
+					if (first) {
+						first = false;
+					} else {
+						fprintf(stderr, ", ");
+					}
+					fprintf(stderr, "%s", token_to_string(token, parser->extra_token_strings));
+				}
+			}
+		}
+		fprintf(stderr, "\n");
+	}
+	fprintf(stderr, "\n\n");
+}
+
+internal
+void print_parse_table(Parser *parser, u32 *table) {
+	fprintf(stderr, "Parse table:\n");
+	for (u32 i = 0; i < parser->ruleset_count; i++) {
+		fprintf(stderr, "Rule set %u %s:\n", i, parser->rulesets[i].nonterminal);
+		u32 count = *table++;
+		for (u32 j = 0; j < count; j++) {
+			fprintf(stderr, "  Rule %u: ", j);
+			while (true) {
+				u32 word = *table++;
+				b32 is_last = word & END_BIT;
+				u32 term = word &~ END_BIT;
+				fprintf(stderr, "%s", token_to_string(term, parser->extra_token_strings));
+				if (is_last) {
+					break;
+				}
+				fprintf(stderr, ", ");
+			}
+			fprintf(stderr, "\n");
+		}
+		fprintf(stderr, "\n");
+	}
+	fprintf(stderr, "\n");
+}
+
+internal
+void report_parse_error(Parser *parser, u32 offset_start, u32 offset_end, char *message, ...) {
+	va_list args;
+	va_start(args, message);
+	Location start = location_for_offset(parser->file, offset_start);
+	Location end = location_for_offset(parser->file, offset_end);
+	vreport_error(parser->errors, parser->file, message, start, start, end, args);
+	va_end(args);
+}
+
+internal
+void report_parser_conflict(Parser *parser, RuleSet *ruleset, Rule conflict_rule,
+                            u32 conflict_word, u32 conflict_index) {
+	parser->errors->fatal = true;
+	RuleSet *rs = ruleset;
+	u32 count = rs->count;
+	Rule existing_rule;
+	for (u32 j = 0; j < count; j++) {
+		if (j == array_count(rs->rules)) {
+			j = 0;
+			count -= array_count(rs->rules);
+			rs = &parser->extra_blocks[rs->next];
+		}
+		u32 first = rs->rules[j].first;
+		if ((first & NONTERM_BIT) != 0) {
+			first &= ~NONTERM_BIT;
+			if ((FIRST_SET_TABLE(parser)[first][conflict_word] & 1 << conflict_index) != 0) {
+				existing_rule = rs->rules[j];
+				break;
+			}
+		} else {
+			u32 word = first / BITSET_WORD_SIZE;
+			u32 index = first - word * BITSET_WORD_SIZE;
+			if (word == conflict_word && index == conflict_index) {
+				existing_rule = rs->rules[j];
+				break;
+			}
+		}
+	}
+	char *conflict_first = symbol_to_string(parser, conflict_rule.first);
+	char *conflict_comma = "";
+	char *conflict_second = "";
+	if (conflict_rule.second != TOK_NONE) {
+		conflict_comma = ", ";
+		conflict_second = symbol_to_string(parser, conflict_rule.second);
+	}
+	char *existing_first = symbol_to_string(parser, existing_rule.first);
+	char *existing_comma = "";
+	char *existing_second = "";
+	if (existing_rule.second != TOK_NONE) {
+		existing_comma = ", ";
+		existing_second = symbol_to_string(parser, existing_rule.second);
+	}
+	char *terminal = token_to_string(conflict_word * BITSET_WORD_SIZE + conflict_index,
+	                                 parser->extra_token_strings);
+	report_parse_error(parser, -1u, -1u,
+	                   ERROR "parse rule conflict on terminal %0", terminal);
+	report_parse_error(parser, conflict_rule.offset_start, conflict_rule.offset_end,
+	                   NOTE "new parse rule: %0 -> %1%2%3",
+	                   ruleset->nonterminal, conflict_first, conflict_comma, conflict_second);
+	report_parse_error(parser, existing_rule.offset_start, existing_rule.offset_end,
+	                   NOTE "existing parse rule: %0 -> %1%2%3",
+	                   ruleset->nonterminal, existing_first, existing_comma, existing_second);
+}
+
+internal
+u32 bitset_popcount(u32 width, u64 bitset[static width]) {
+	u32 count = 0;
+	for (u32 i = 0; i < width; i++) {
+		count += (u32)__builtin_popcountl(bitset[i]);
+	}
+	return count;
+}
+
+// TODO incremental updates
+internal
+void regen_parse_table(Parser *parser) {
+	u32 bitset_width = (TOK_EXTRA_BASE + parser->extra_token_count - 1) / BITSET_WORD_SIZE + 1;
+	u64 (*first_set_table)[bitset_width] = calloc(parser->ruleset_count, bitset_width * sizeof(u64));
+	u64 (*first_set_table_old)[bitset_width] = calloc(parser->ruleset_count, bitset_width * sizeof(u64));
+	parser->bitset_width = bitset_width;
+	// TODO free old table
+	parser->first_set_table = (u64 *)first_set_table;
+	b32 changed;
+	do {
+		for (u32 i = 0; i < parser->ruleset_count; i++) {
+			RuleSet *rs = &parser->rulesets[i];
+			u32 count = rs->count;
+			for (u32 j = 0; j < count; j++) {
+				if (j == array_count(rs->rules)) {
+					j = 0;
+					count -= array_count(rs->rules);
+					rs = &parser->extra_blocks[rs->next];
+				}
+				u32 first = rs->rules[j].first;
+				if ((first & NONTERM_BIT) != 0) {
+					first &= ~NONTERM_BIT;
+					for (u32 k = 0; k < bitset_width; k++) {
+						first_set_table[i][k] |= first_set_table[first][k];
+					}
+				} else {
+					u32 word = first / BITSET_WORD_SIZE;
+					u32 index = first - word * BITSET_WORD_SIZE;
+					first_set_table[i][word] |= 1 << index;
+				}
+			}
+		}
+		changed = memcmp(first_set_table, first_set_table_old, parser->ruleset_count * bitset_width) != 0;
+		if (changed) {
+			memcpy(first_set_table_old, first_set_table, parser->ruleset_count * bitset_width);
+		}
+	} while (changed);
+	print_first_set_table(parser);
+	u32 *parse_table_index = malloc(parser->ruleset_count * sizeof(u32));
+	u32 parse_table_size = 0;
+	for (u32 i = 0; i < parser->ruleset_count; i++) {
+		parse_table_size += 1 + bitset_popcount(bitset_width, first_set_table[i]);
+	}
+	u32 *parse_table = malloc(parse_table_size * sizeof(u32));
+	u64 *used_first_set = malloc(bitset_width * sizeof(u64));
+	u32 cursor = 0;
+	for (u32 i = 0; i < parser->ruleset_count; i++) {
+		parse_table_index[i] = cursor;
+		parse_table[cursor++] = bitset_popcount(bitset_width, first_set_table[i]);
+		memset(used_first_set, 0, bitset_width * sizeof(u64));
+		RuleSet *rs = &parser->rulesets[i];
+		u32 count = rs->count;
+		for (u32 j = 0; j < count; j++) {
+			if (j == array_count(rs->rules)) {
+				j = 0;
+				count -= array_count(rs->rules);
+				rs = &parser->extra_blocks[rs->next];
+			}
+			u32 first = rs->rules[j].first;
+			if ((first & NONTERM_BIT) != 0) {
+				first &= ~NONTERM_BIT;
+				for (u32 k = 0; k < bitset_width; k++) {
+					u64 conflict = used_first_set[k] & first_set_table[first][k];
+					if (conflict != 0) {
+						u32 index = (u32)__builtin_ffsl((s64)conflict) - 1;
+						report_parser_conflict(parser, &parser->rulesets[i],
+						                       rs->rules[j], k, index);
+						return;
+					}
+					used_first_set[k] |= first_set_table[first][k];
+				}
+			} else {
+				u32 word = first / BITSET_WORD_SIZE;
+				u32 index = first - word * BITSET_WORD_SIZE;
+				u64 conflict = used_first_set[word] & 1 << index;
+				if (conflict != 0) {
+					report_parser_conflict(parser, &parser->rulesets[i],
+					                       rs->rules[j], word, index);
+					return;
+				}
+				used_first_set[word] |= 1 << index;
+			}
+		}
+		rs = &parser->rulesets[i];
+		for (u32 j = 0; j < count; j++) {
+			if (j == array_count(rs->rules)) {
+				j = 0;
+				count -= array_count(rs->rules);
+				rs = &parser->extra_blocks[rs->next];
+			}
+			u32 first = rs->rules[j].first;
+			if ((first & NONTERM_BIT) != 0) {
+				first &= ~NONTERM_BIT;
+				for (u32 k = 0; k < bitset_width; k++) {
+					u64 word = first_set_table[first][k];
+					while (word != 0) {
+						u32 next_token_offset = (u32)__builtin_ffsl((s64)word) - 1;
+						word >>= next_token_offset + 1;
+						word <<= next_token_offset + 1;
+						parse_table[cursor++] = k * BITSET_WORD_SIZE + next_token_offset;
+					}
+				}
+			} else {
+				parse_table[cursor++] = first;
+			}
+			parse_table[cursor - 1] |= END_BIT;
+		}
+	}
+	print_parse_table(parser, parse_table);
+	free(used_first_set);
+	free(first_set_table);
+}
+
+internal
+void parse(SourceFile file, ErrorCount *errors) {
+	// TODO detect leading indent
+	// TODO error productions
+	// TODO parse actions
+	// TODO remove
+	char *extra_tokens[] = {
+		"__register_keyword",
+		"__register_rule_native_hex",
+	};
+	char *extra_token_strings[] = {
+		"\"__register_keyword\"",
+		"\"__register_rule_native_hex\"",
+	};
+	RuleSet rulesets[] = {
+		{ "keywords.register[1]", 0, 1, { {TOK_STRING, TOK_NEWLINE, -1u, -1u}, } },
+		{ "keywords.register[0]", 0, 1, { {TOK_EXTRA_BASE + 0, NONTERM_BIT | 0, -1u, -1u}, } },
+		{ "rules.register.native.hex[2]", 0, 3,
+			{
+				{TOK_RBRACE, TOK_NEWLINE, -1u, -1u},
+				{TOK_NEWLINE, NONTERM_BIT | 2, -1u, -1u},
+				{TOK_NUMBER, NONTERM_BIT | 2, -1u, -1u},
+			}
+		},
+		{ "rules.register.native.hex[1]", 0, 1, { {TOK_LBRACE, NONTERM_BIT | 2, -1u, -1u}, } },
+		{ "rules.register.native.hex[0]", 0, 1, { {TOK_EXTRA_BASE + 1, NONTERM_BIT | 3, -1u, -1u}, } },
+		{ "toplevel", 0, 2,
+			{
+				{NONTERM_BIT | 1, TOK_NONE, -1u, -1u},
+				{NONTERM_BIT | 4, TOK_NONE, -1u, -1u},
+			}
+		},
+	};
+	RuleSet extra_blocks[] = {};
+	Parser parser = {
+		&file,
+		errors,
+		array_count(extra_tokens),
+		extra_tokens,
+		extra_token_strings,
+		array_count(rulesets),
+		rulesets,
+		array_count(extra_blocks),
+		extra_blocks,
+		0,
+		NULL,
+	};
+	print_parse_rules(&parser);
+	regen_parse_table(&parser);
+}
+
 // Many arrays have a 32bit count. We ensure that these do not overflow by
 // restricting the maximum file size to be safe in the worst case.
 // If the file size is N, then the worst case values are:
@@ -932,6 +1352,10 @@ int format_main(int argc, char *argv[static argc]) {
 		return 1;
 	}
 	balance_brackets(file, &errors);
+	if (errors.fatal) {
+		return 1;
+	}
+	parse(file, &errors);
 	if (errors.fatal) {
 		return 1;
 	}
