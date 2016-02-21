@@ -572,7 +572,7 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 			c = next();
 			NEXT_TOKEN;
 		}
-		if (is_start_letter(c.cp)) {
+		if ('0' <= c.cp && c.cp <= '9' || is_start_letter(c.cp)) {
 			c = next();
 			while (is_continue_letter(c.cp)) {
 				c = next();
