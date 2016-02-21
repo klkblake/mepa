@@ -723,8 +723,13 @@ typedef struct {
 	char *nonterminal;
 	u32 next;
 	u32 count; // only used in first block
-	Rule rules[3];
+	Rule rules[4];
 } RuleSet;
+
+typedef struct {
+	u32 next;
+	Rule rules[5];
+} ExtraRules;
 
 // The parser table consists of one entry for each rule set. Each entry is a
 // count followed by a series of records. Each record corresponds to a rule,
@@ -744,7 +749,7 @@ typedef struct {
 	u32 ruleset_count;
 	RuleSet *rulesets;
 	u32 extra_block_count;
-	RuleSet *extra_blocks;
+	ExtraRules *extra_rules;
 	u32 bitset_width;
 	u64 *first_set_table;
 } Parser;
@@ -769,21 +774,37 @@ char *symbol_to_string(Parser *parser, u32 symbol) {
 	}
 }
 
+// TODO collate these into a struct
+#define RULESET_ITER_DECLARE(rules, count, current_count, next) Rule *rules; u32 count, current_count, next
+#define RULESET_ITER_INIT(rules_, count_, current_count, next_, rs) \
+	rules_ = (rs)->rules; \
+	count_ = (rs)->count; \
+	current_count = array_count((rs)->rules); \
+	next_ = rs->next
+#define RULESET_ITER_DEFINE(rules, count, current_count, next, rs) \
+	RULESET_ITER_DECLARE(rules, count, current_count, next); \
+	RULESET_ITER_INIT(rules, count, current_count, next, rs)
+#define RULESET_ITER_UPDATE(rules_, count, current_count, next_, i) \
+	if (i == current_count) { \
+		i = 0; \
+		count -= current_count; \
+		ExtraRules *extra = &parser->extra_rules[next_]; \
+		next_ = extra->next; \
+		rules_ = extra->rules; \
+		current_count = array_count(extra->rules); \
+	}
+
 internal
 void print_parse_rules(Parser *parser) {
 	fprintf(stderr, "Parse rules:\n");
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
 		fprintf(stderr, "Rule set %u %s:\n", i, parser->rulesets[i].nonterminal);
 		RuleSet *rs = &parser->rulesets[i];
-		u32 count = rs->count;
+		RULESET_ITER_DEFINE(rules, count, current_count, next, rs);
 		for (u32 j = 0, rule_idx = 0; j < count; j++, rule_idx++) {
 			fprintf(stderr, "  Rule %u: ", rule_idx);
-			if (j == array_count(rs->rules)) {
-				j = 0;
-				count -= array_count(rs->rules);
-				rs = &parser->extra_blocks[rs->next];
-			}
-			Rule rule = rs->rules[j];
+			RULESET_ITER_UPDATE(rules, count, current_count, next, j);
+			Rule rule = rules[j];
 			fprintf(stderr, "%s", symbol_to_string(parser, rule.first));
 			if (rule.second != TOK_NONE) {
 				fprintf(stderr, ", %s", symbol_to_string(parser, rule.second));
@@ -859,27 +880,22 @@ internal
 void report_parser_conflict(Parser *parser, RuleSet *ruleset, Rule conflict_rule,
                             u32 conflict_word, u32 conflict_index) {
 	parser->errors->fatal = true;
-	RuleSet *rs = ruleset;
-	u32 count = rs->count;
+	RULESET_ITER_DEFINE(rules, count, current_count, next, ruleset);
 	Rule existing_rule;
-	for (u32 j = 0; j < count; j++) {
-		if (j == array_count(rs->rules)) {
-			j = 0;
-			count -= array_count(rs->rules);
-			rs = &parser->extra_blocks[rs->next];
-		}
-		u32 first = rs->rules[j].first;
+	for (u32 i = 0; i < count; i++) {
+		RULESET_ITER_UPDATE(rules, count, current_count, next, i);
+		u32 first = rules[i].first;
 		if ((first & NONTERM_BIT) != 0) {
 			first &= ~NONTERM_BIT;
 			if ((FIRST_SET_TABLE(parser)[first][conflict_word] & 1 << conflict_index) != 0) {
-				existing_rule = rs->rules[j];
+				existing_rule = rules[i];
 				break;
 			}
 		} else {
 			u32 word = first / BITSET_WORD_SIZE;
 			u32 index = first - word * BITSET_WORD_SIZE;
 			if (word == conflict_word && index == conflict_index) {
-				existing_rule = rs->rules[j];
+				existing_rule = rules[i];
 				break;
 			}
 		}
@@ -932,14 +948,10 @@ void regen_parse_table(Parser *parser) {
 	do {
 		for (u32 i = 0; i < parser->ruleset_count; i++) {
 			RuleSet *rs = &parser->rulesets[i];
-			u32 count = rs->count;
+			RULESET_ITER_DEFINE(rules, count, current_count, next, rs);
 			for (u32 j = 0; j < count; j++) {
-				if (j == array_count(rs->rules)) {
-					j = 0;
-					count -= array_count(rs->rules);
-					rs = &parser->extra_blocks[rs->next];
-				}
-				u32 first = rs->rules[j].first;
+				RULESET_ITER_UPDATE(rules, count, current_count, next, j);
+				u32 first = rules[j].first;
 				if ((first & NONTERM_BIT) != 0) {
 					first &= ~NONTERM_BIT;
 					for (u32 k = 0; k < bitset_width; k++) {
@@ -971,22 +983,17 @@ void regen_parse_table(Parser *parser) {
 		parse_table[cursor++] = (u16)bitset_popcount(bitset_width, first_set_table[i]);
 		memset(used_first_set, 0, bitset_width * sizeof(u64));
 		RuleSet *rs = &parser->rulesets[i];
-		u32 count = rs->count;
+		RULESET_ITER_DEFINE(rules, count, current_count, next, rs);
 		for (u32 j = 0; j < count; j++) {
-			if (j == array_count(rs->rules)) {
-				j = 0;
-				count -= array_count(rs->rules);
-				rs = &parser->extra_blocks[rs->next];
-			}
-			u32 first = rs->rules[j].first;
+			RULESET_ITER_UPDATE(rules, count, current_count, next, j);
+			u32 first = rules[j].first;
 			if ((first & NONTERM_BIT) != 0) {
 				first &= ~NONTERM_BIT;
 				for (u32 k = 0; k < bitset_width; k++) {
 					u64 conflict = used_first_set[k] & first_set_table[first][k];
 					if (conflict != 0) {
 						u32 index = (u32)__builtin_ffsl((s64)conflict) - 1;
-						report_parser_conflict(parser, &parser->rulesets[i],
-						                       rs->rules[j], k, index);
+						report_parser_conflict(parser, rs, rules[j], k, index);
 						return;
 					}
 					used_first_set[k] |= first_set_table[first][k];
@@ -996,21 +1003,16 @@ void regen_parse_table(Parser *parser) {
 				u32 index = first - word * BITSET_WORD_SIZE;
 				u64 conflict = used_first_set[word] & 1 << index;
 				if (conflict != 0) {
-					report_parser_conflict(parser, &parser->rulesets[i],
-					                       rs->rules[j], word, index);
+					report_parser_conflict(parser, rs, rules[j], word, index);
 					return;
 				}
 				used_first_set[word] |= 1 << index;
 			}
 		}
-		rs = &parser->rulesets[i];
+		RULESET_ITER_INIT(rules, count, current_count, next, rs);
 		for (u32 j = 0; j < count; j++) {
-			if (j == array_count(rs->rules)) {
-				j = 0;
-				count -= array_count(rs->rules);
-				rs = &parser->extra_blocks[rs->next];
-			}
-			u32 first = rs->rules[j].first;
+			RULESET_ITER_UPDATE(rules, count, current_count, next, j);
+			u32 first = rules[j].first;
 			if ((first & NONTERM_BIT) != 0) {
 				first &= ~NONTERM_BIT;
 				for (u32 k = 0; k < bitset_width; k++) {
@@ -1066,7 +1068,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 			}
 		},
 	};
-	RuleSet extra_blocks[] = {};
+	ExtraRules extra_rules[] = {};
 	Parser parser = {
 		&file,
 		errors,
@@ -1075,8 +1077,8 @@ void parse(SourceFile file, ErrorCount *errors) {
 		extra_token_strings,
 		array_count(rulesets),
 		rulesets,
-		array_count(extra_blocks),
-		extra_blocks,
+		array_count(extra_rules),
+		extra_rules,
 		0,
 		NULL,
 	};
