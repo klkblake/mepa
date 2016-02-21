@@ -594,6 +594,8 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 		c = next();
 	}
 	file.token_offsets = realloc(file.token_offsets, file.token_count * sizeof(u32));
+	file.bracket_count = bracket_index;
+	file.brackets = realloc(file.brackets, file.bracket_count * sizeof(Bracket));
 	return file;
 #undef NEXT_TOKEN
 #undef next
@@ -819,6 +821,7 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	}
 	file.line_count = histo['\n'] + 1; // Add a line for the EOF
 	file.lines = malloc(file.line_count * sizeof(Line));
+	// Overestimate -- comments may contain brackets too
 	file.bracket_count = histo['('] + histo[')'] + histo['['] + histo[']'] + histo['{'] + histo['}'];
 	file.brackets = malloc(file.bracket_count * sizeof(Bracket));
 	*vfile = validate_utf8(file, errors);
