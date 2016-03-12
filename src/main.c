@@ -678,26 +678,23 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 #define NONTERM_BIT    (1u << 15)
 #define TOK_NONE       ((u16)-1u)
 #define TOK_EOF        0
-#define TOK_COMMENT    1
-#define TOK_SPACES     2
-#define TOK_NEWLINE    3
-#define TOK_STRING     4
-#define TOK_NUMBER     5
-#define TOK_LPAREN     6
-#define TOK_RPAREN     7
-#define TOK_LBRACKET   8
-#define TOK_RBRACKET   9
-#define TOK_LBRACE     10
-#define TOK_RBRACE     11
-#define TOK_SYMBOL     12
-#define TOK_IDENT      13
-#define TOK_EXTRA_BASE 14
+#define TOK_NEWLINE    1
+#define TOK_STRING     2
+#define TOK_NUMBER     3
+#define TOK_BRACKETS_START 4
+#define TOK_LPAREN     4
+#define TOK_RPAREN     5
+#define TOK_LBRACKET   6
+#define TOK_RBRACKET   7
+#define TOK_LBRACE     8
+#define TOK_RBRACE     9
+#define TOK_BRACKETS_END 9
+#define TOK_IDENT      10
+#define TOK_EXTRA_BASE 11
 
 internal
 char *token_strings[] = {
 	"<EOF>",
-	"<comment>",
-	"<spaces>",
 	"<newline>",
 	"<string>",
 	"<number>",
@@ -707,7 +704,6 @@ char *token_strings[] = {
 	"']'",
 	"'{'",
 	"'}'",
-	"<symbol>",
 	"<ident>",
 };
 
@@ -732,9 +728,9 @@ typedef struct {
 } ExtraRules;
 
 // The parser table consists of one entry for each rule set. Each entry is a
-// count followed by a series of records. Each record corresponds to a rule,
-// and is composed of the set of terminals that trigger that rule. The last
-// terminal is marked with END_BIT.
+// record count followed by a series of records. Each record corresponds to a
+// rule, and is composed of the set of terminals that trigger that rule. The
+// last terminal is marked with END_BIT.
 #define END_BIT (1u << 15)
 
 #define BITSET_WORD_SIZE (sizeof(u64) * 8)
@@ -752,6 +748,8 @@ typedef struct {
 	ExtraRules *extra_rules;
 	u32 bitset_width;
 	u64 *first_set_table;
+	u32 *parse_table_index;
+	u16 *parse_table;
 } Parser;
 #define FIRST_SET_TABLE(parser) ((u64 (*)[(parser)->bitset_width])(parser)->first_set_table)
 
@@ -868,8 +866,7 @@ void print_parse_table(Parser *parser, u16 *table) {
 	fprintf(stderr, "Parse table:\n");
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
 		fprintf(stderr, "Rule set %u %s:\n", i, parser->rulesets[i].nonterminal);
-		u32 count = *table++;
-		for (u32 j = 0; j < count; j++) {
+		for (u32 j = 0; j < parser->rulesets[i].count; j++) {
 			fprintf(stderr, "  Rule %u: ", j);
 			while (true) {
 				u32 word = *table++;
@@ -956,13 +953,13 @@ u32 bitset_popcount(u32 width, u64 bitset[static width]) {
 }
 
 // TODO incremental updates
+// TODO proper memory management of intermediate structures
 internal
 void regen_parse_table(Parser *parser) {
 	u32 bitset_width = (TOK_EXTRA_BASE + parser->extra_token_count - 1) / BITSET_WORD_SIZE + 1;
 	u64 (*first_set_table)[bitset_width] = calloc(parser->ruleset_count, bitset_width * sizeof(u64));
 	u64 (*first_set_table_old)[bitset_width] = calloc(parser->ruleset_count, bitset_width * sizeof(u64));
 	parser->bitset_width = bitset_width;
-	// TODO free old table
 	parser->first_set_table = (u64 *)first_set_table;
 	b32 changed;
 	do {
@@ -987,19 +984,17 @@ void regen_parse_table(Parser *parser) {
 		}
 	} while (changed);
 	print_first_set_table(parser);
-	u32 *parse_table_index = malloc(parser->ruleset_count * sizeof(u32));
 	u32 parse_table_size = 0;
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
-		parse_table_size += 1 + bitset_popcount(bitset_width, first_set_table[i]);
+		parse_table_size += bitset_popcount(bitset_width, first_set_table[i]);
 	}
 	u16 *parse_table = malloc(parse_table_size * sizeof(u16));
 	u64 *used_first_set = malloc(bitset_width * sizeof(u64));
 	u32 cursor = 0;
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
-		parse_table_index[i] = cursor;
-		parse_table[cursor++] = (u16)bitset_popcount(bitset_width, first_set_table[i]);
-		memset(used_first_set, 0, bitset_width * sizeof(u64));
 		RuleSet *rs = &parser->rulesets[i];
+		parser->parse_table_index[i] = cursor;
+		memset(used_first_set, 0, bitset_width * sizeof(u64));
 		foreach_rule(parser, rs, iter) {
 			u32 first = iter.rule->first;
 			if ((first & NONTERM_BIT) != 0) {
@@ -1044,8 +1039,29 @@ void regen_parse_table(Parser *parser) {
 		}
 	}
 	print_parse_table(parser, parse_table);
+	parser->parse_table = parse_table;
 	free(used_first_set);
 	free(first_set_table);
+}
+
+typedef struct {
+	u16 *data;
+	u32 len;
+	u32 cap;
+} Stack;
+
+internal
+void stack_push(Stack *stack, u16 sym) {
+	if (stack->len >= stack->cap) {
+		stack->cap += stack->cap >> 1;
+		stack->data = realloc(stack->data, stack->cap);
+	}
+	stack->data[stack->len++] = sym;
+}
+
+internal
+void *memdup(void *src, u64 size) {
+	return memcpy(malloc(size), src, size);
 }
 
 internal
@@ -1053,7 +1069,6 @@ void parse(SourceFile file, ErrorCount *errors) {
 	// TODO detect leading indent
 	// TODO error productions
 	// TODO parse actions
-	// TODO remove
 	char *extra_tokens[] = {
 		"__register_keyword",
 		"__register_rule_native_hex",
@@ -1062,41 +1077,209 @@ void parse(SourceFile file, ErrorCount *errors) {
 		"\"__register_keyword\"",
 		"\"__register_rule_native_hex\"",
 	};
-	RuleSet rulesets[] = {
-		{ "keywords.register[1]", 0, 1, { {TOK_STRING, TOK_NEWLINE, -1u, -1u}, } },
-		{ "keywords.register[0]", 0, 1, { {TOK_EXTRA_BASE + 0, NONTERM_BIT | 0, -1u, -1u}, } },
-		{ "rules.register.native.hex[2]", 0, 3,
-			{
-				{TOK_RBRACE, TOK_NEWLINE, -1u, -1u},
-				{TOK_NEWLINE, NONTERM_BIT | 2, -1u, -1u},
-				{TOK_NUMBER, NONTERM_BIT | 2, -1u, -1u},
-			}
-		},
-		{ "rules.register.native.hex[1]", 0, 1, { {TOK_LBRACE, NONTERM_BIT | 2, -1u, -1u}, } },
-		{ "rules.register.native.hex[0]", 0, 1, { {TOK_EXTRA_BASE + 1, NONTERM_BIT | 3, -1u, -1u}, } },
-		{ "toplevel", 0, 2,
-			{
-				{NONTERM_BIT | 1, TOK_NONE, -1u, -1u},
-				{NONTERM_BIT | 4, TOK_NONE, -1u, -1u},
-			}
-		},
-	};
-	ExtraRules extra_rules[] = {};
+	u32 nt_base = __COUNTER__ + 1;
+	RuleSet rulesets[7];
+#define RULES2(first, second) {first, second, -1u, -1u}
+#define RULES4(f0, s0, f1, s1) RULES2(f0, s0), RULES2(f1, s1)
+#define RULES6(f0, s0, f1, s1, f2, s2) RULES4(f0, s0, f1, s1), RULES2(f2, s2)
+#define RULESET(cname, name, ...) \
+	u16 rs_idx_##cname = (u16)(__COUNTER__ - nt_base); \
+	u16 nt_##cname = NONTERM_BIT | rs_idx_##cname; \
+	assert(rs_idx_##cname < array_count(rulesets)); \
+	rulesets[rs_idx_##cname] = (RuleSet){ name, 0, VA_NARG(__VA_ARGS__) / 2, \
+		{ CAT(RULES, VA_NARG(__VA_ARGS__))(__VA_ARGS__) } }
+	RULESET(regkw_keyword, "keywords.register:keyword", TOK_STRING, TOK_NEWLINE);
+	RULESET(regkw, "keywords.register", TOK_EXTRA_BASE + 0, nt_regkw_keyword);
+	RULESET(regrule_body, "rules.register.native.hex:body",
+	        TOK_RBRACE, TOK_NEWLINE,
+	        TOK_NEWLINE, nt_regrule_body,
+	        TOK_NUMBER, nt_regrule_body);
+	RULESET(regrule_body_start, "rules.register.native.hex:body_start", TOK_LBRACE, nt_regrule_body);
+	// TODO good position for adding an extension to test extensibility
+	RULESET(regrule_name, "rules.register.native.hex:name", TOK_STRING, nt_regrule_body_start);
+	RULESET(regrule_arch, "rules.register.native.hex:arch", TOK_IDENT, nt_regrule_name);
+	RULESET(regrule, "rules.register.native.hex", TOK_EXTRA_BASE + 1, nt_regrule_arch);
+	RULESET(toplevel, "toplevel",
+	        nt_regkw, TOK_NONE,
+		nt_regrule, TOK_NONE);
+	RULESET(start, "start",
+		nt_toplevel, nt_start,
+		TOK_EOF, TOK_NONE);
+#undef RULESET
+#undef RULES6
+#undef RULES4
+#undef RULES2
 	Parser parser = {
 		&file,
 		errors,
 		array_count(extra_tokens),
-		extra_tokens,
-		extra_token_strings,
+		memdup(extra_tokens, sizeof(extra_tokens)),
+		memdup(extra_token_strings, sizeof(extra_token_strings)),
 		array_count(rulesets),
-		rulesets,
-		array_count(extra_rules),
-		extra_rules,
+		memdup(rulesets, sizeof(rulesets)),
 		0,
 		NULL,
+		0,
+		NULL,
+		malloc(array_count(rulesets) * sizeof(u32)),
+		NULL,
+	};
+	u32 token_map[256] = {
+		['"'] = TOK_STRING,
+		['\n'] = TOK_NEWLINE,
+		['0'] = TOK_NUMBER,
+		['1'] = TOK_NUMBER,
+		['2'] = TOK_NUMBER,
+		['3'] = TOK_NUMBER,
+		['4'] = TOK_NUMBER,
+		['5'] = TOK_NUMBER,
+		['6'] = TOK_NUMBER,
+		['7'] = TOK_NUMBER,
+		['8'] = TOK_NUMBER,
+		['9'] = TOK_NUMBER,
+		['('] = TOK_LPAREN,
+		[')'] = TOK_RPAREN,
+		['['] = TOK_LBRACKET,
+		[']'] = TOK_RBRACKET,
+		['{'] = TOK_LBRACE,
+		['}'] = TOK_RBRACE,
 	};
 	print_parse_rules(&parser);
 	regen_parse_table(&parser);
+	Stack stack = {};
+	stack.cap = 8;
+	stack.data = malloc(stack.cap * sizeof(u16));
+	stack_push(&stack, nt_start);
+	b32 recovering = false;
+	b32 found_error = false;
+	u32 token_index = 0;
+	while (stack.len) {
+		// TODO should we precompute the token type?
+		u32 token_offset, token_end;
+		u32 token_len;
+		u8 token_first;
+		u8 token_second;
+		do {
+			token_offset = file.token_offsets[token_index++];
+			if (token_offset == file.len) {
+				token_end = token_offset;
+				token_len = 0;
+				token_first = token_second = 0;
+			} else {
+				token_end = file.token_offsets[token_index] - 1;
+				token_len = token_end - token_offset + 1;
+				token_first = file.data[token_offset];
+				token_second = token_len >= 2 ? file.data[token_offset + 1] : 0;
+			}
+		} while (token_first == ' ' ||
+		         token_first == '/' && (token_second == '/' || token_second == '*'));
+		u32 token;
+		if (token_len == 0) {
+			token = TOK_EOF;
+		} else {
+			token = token_map[token_first];
+			if (token == 0) {
+				token = TOK_IDENT;
+				// TODO make this more efficient
+				for (u32 i = 0; i < parser.extra_token_count; i++) {
+					// TODO limit size of extra tokens
+					u32 len = (u32)strlen(parser.extra_tokens[i]);
+					if (len == token_len &&
+					    memcmp(file.data + token_offset,
+					           parser.extra_tokens[i],
+					           len) == 0) {
+						token = TOK_EXTRA_BASE + i;
+						break;
+					}
+				}
+			}
+		}
+		while (stack.len) {
+			u32 symbol = stack.data[--stack.len];
+			if ((symbol & NONTERM_BIT) == 0) {
+				if (token == symbol) {
+					recovering = false;
+					break;
+				} else {
+					if (!recovering) {
+						report_parse_error(&parser, token_offset, token_end,
+						                   ERROR "mismatched token, expected %0, got %1",
+						                   token_to_string(symbol, parser.extra_tokens),
+						                   token_to_string(token, parser.extra_tokens));
+						found_error = true;
+						recovering = true;
+					}
+					assert(symbol != TOK_EOF);
+					if (token == TOK_EOF) {
+						break;
+					}
+					if (TOK_BRACKETS_START <= symbol && symbol <= TOK_BRACKETS_END &&
+					    TOK_BRACKETS_START <= token && token <= TOK_BRACKETS_END) {
+						// TODO also do this if edit distance is sufficiently small
+						break;
+					}
+					// TODO make sure we don't back out all the way and end the parse
+				}
+			} else {
+				symbol &= ~NONTERM_BIT;
+				u16 *entry = parser.parse_table + parser.parse_table_index[symbol];
+				RuleSet *rs = &parser.rulesets[symbol];
+				if (rs->count == 1) {
+					Rule rule = rs->rules[0];
+					if (rule.second != TOK_NONE) {
+						stack_push(&stack, rule.second);
+					}
+					stack_push(&stack, rule.first);
+					continue;
+				}
+				b32 found = false;
+				for (u32 i = 0; i < rs->count && !found; i++) {
+					while (true) {
+						u32 word = *entry++;
+						b32 is_last = word & END_BIT;
+						u32 term = word &~ END_BIT;
+						if (term == token) {
+							Rule rule;
+							if (i < array_count(rs->rules)) {
+								rule = rs->rules[i];
+							} else {
+								i -= array_count(rs->rules);
+								ExtraRules *rules = &parser.extra_rules[rs->next];
+								while (i >= array_count(rules->rules)) {
+									i -= array_count(rules->rules);
+									rules = &parser.extra_rules[rules->next];
+								}
+								rule = rules->rules[i];
+							}
+							if (rule.second != TOK_NONE) {
+								stack_push(&stack, rule.second);
+							}
+							stack_push(&stack, rule.first);
+							found = true;
+							break;
+						}
+						if (is_last) {
+							break;
+						}
+					}
+				}
+				if (!found) {
+					// TODO dump options
+					if (!recovering) {
+						report_parse_error(&parser, token_offset, token_end,
+						                   ERROR "no match for token %0 in ruleset \"%1\"",
+						                   token_to_string(token, parser.extra_tokens),
+						                   rs->nonterminal);
+						found_error = true;
+						recovering = true;
+					}
+					// TODO handle no match
+				}
+			}
+		}
+	}
+	// TODO handle ran out of stack -- we need to check if this was a failure
+
 }
 
 // Many arrays have a 32bit count. We ensure that these do not overflow by
