@@ -1078,7 +1078,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 		"\"__register_rule_native_hex\"",
 	};
 	u32 nt_base = __COUNTER__ + 1;
-	RuleSet rulesets[7];
+	RuleSet rulesets[9];
 #define RULES2(first, second) {first, second, -1u, -1u}
 #define RULES4(f0, s0, f1, s1) RULES2(f0, s0), RULES2(f1, s1)
 #define RULES6(f0, s0, f1, s1, f2, s2) RULES4(f0, s0, f1, s1), RULES2(f2, s2)
@@ -1419,6 +1419,7 @@ int process_common_command_line(int argc, char *argv[static argc], SourceFile *v
 	}
 	fclose(file_stream);
 	if (file.len == 0) {
+		*vfile = file;
 		return 0;
 	}
 	if (estimate != -1 && file.len != estimate) {
@@ -1543,6 +1544,9 @@ int format_main(int argc, char *argv[static argc]) {
 	int result = process_common_command_line(argc, argv, &file, &errors);
 	if (result != 0) {
 		return result;
+	}
+	if (file.len == 0) {
+		return 0;
 	}
 	file = tokenise(file, &errors);
 	if (errors.fatal) {
