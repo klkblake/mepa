@@ -1096,12 +1096,14 @@ void parse(SourceFile file, ErrorCount *errors) {
 	        TOK_NUMBER, nt_regrule_body);
 	RULESET(regrule_body_start, "rules.register.native.hex:body_start", TOK_LBRACE, nt_regrule_body);
 	// TODO good position for adding an extension to test extensibility
-	RULESET(regrule_name, "rules.register.native.hex:name", TOK_STRING, nt_regrule_body_start);
-	RULESET(regrule_arch, "rules.register.native.hex:arch", TOK_IDENT, nt_regrule_name);
-	RULESET(regrule, "rules.register.native.hex", TOK_EXTRA_BASE + 1, nt_regrule_arch);
+	RULESET(regrule_arch, "rules.register.native.hex:arch", TOK_IDENT, nt_regrule_body_start);
+	RULESET(regrule_name, "rules.register.native.hex:name", TOK_STRING, nt_regrule_arch);
+	RULESET(regrule, "rules.register.native.hex", TOK_EXTRA_BASE + 1, nt_regrule_name);
 	RULESET(toplevel, "toplevel",
+	        TOK_NEWLINE, TOK_NONE,
 	        nt_regkw, TOK_NONE,
 		nt_regrule, TOK_NONE);
+	// TODO this shouldn't be a rule
 	RULESET(start, "start",
 		nt_toplevel, nt_start,
 		TOK_EOF, TOK_NONE);
