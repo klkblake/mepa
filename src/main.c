@@ -1064,6 +1064,12 @@ void *memdup(void *src, u64 size) {
 	return memcpy(malloc(size), src, size);
 }
 
+// TODO extensible objects
+//  - Field names are namespaced in structs
+//  - Names map to field indexes and offsets.
+//  - Structs track highest field that they have allocated memory for.
+//  - If allocated in pools, each pool could track the highest field
+
 internal
 void parse(SourceFile file, ErrorCount *errors) {
 	// TODO detect leading indent
