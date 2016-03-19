@@ -9,6 +9,13 @@
 #include <sysexits.h>
 
 typedef struct {
+	u32 len;
+	u8 *data;
+} String;
+
+#define S(cstr) (String){sizeof(cstr) - 1, (u8 *)cstr}
+
+typedef struct {
 	u32 line;
 	u32 column;
 } Location;
@@ -105,10 +112,10 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 			argc++;
 		}
 	}
-	char *argv[argc];
+	String argv[argc];
 	if (argc) {
 		for (u32 i = 0; i < argc; i++) {
-			argv[i] = va_arg(args, char *);
+			argv[i] = va_arg(args, String);
 		}
 	}
 	char *message_end = message + message_len;
@@ -124,8 +131,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		u8 c = (u8)message[1];
 		assert('0' <= c && c <= '9');
 		c -= '0';
-		u32 arg_len = (u32)strlen(argv[c]);
-		fwrite(argv[c], 1, arg_len, stderr);
+		fwrite(argv[c].data, 1, argv[c].len, stderr);
 		message += 2;
 	}
 	fprintf(stderr, "%s\n", term_reset);
@@ -651,15 +657,15 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 			} else if ((u32)match < bracket_count - 1) {
 				Bracket *top = brackets[bracket_count - 1];
 				u8 wanted = BRACKET_TYPE(top->c);
-				u8 open_str[] = { open_bracket[wanted], 0 };
-				u8 close_str[] = { close_bracket[wanted], 0 };
+				String open_str = { 1, &open_bracket[wanted] };
+				String close_str = { 1, &close_bracket[wanted] };
 				report_bracket_error(errors, &file, bracket->offset,
 				                     ERROR "expected closing '%0'", close_str);
 				report_bracket_error(errors, &file, top->offset,
 				                     NOTE "to match this '%0'", open_str);
 				if ((u32)match + 1 != bracket_count - 1) {
 					for (u32 i = bracket_count - 1; i > (u32)match; i--) {
-						u8 bstr[] = { brackets[i]->c, 0 };
+						String bstr = { 1, &brackets[i]->c };
 						report_bracket_error(errors, &file, brackets[i]->offset,
 						                     NOTE "deleting unclosed bracket '%0'", bstr);
 						brackets[i]->c = 0;
@@ -694,18 +700,18 @@ void balance_brackets(SourceFile file, ErrorCount *errors) {
 #define TOK_EXTRA_BASE 11
 
 internal
-char *token_strings[] = {
-	"<EOF>",
-	"<newline>",
-	"<string>",
-	"<number>",
-	"'('",
-	"')'",
-	"'['",
-	"']'",
-	"'{'",
-	"'}'",
-	"<ident>",
+String token_strings[] = {
+	S("<EOF>"),
+	S("<newline>"),
+	S("<string>"),
+	S("<number>"),
+	S("'('"),
+	S("')'"),
+	S("'['"),
+	S("']'"),
+	S("'{'"),
+	S("'}'"),
+	S("<ident>"),
 };
 
 struct Parser;
@@ -721,7 +727,7 @@ typedef struct {
 } Rule;
 
 typedef struct {
-	char *nonterminal;
+	String nonterminal;
 	u32 next;
 	u32 count; // only used in first block
 	Rule rules[4];
@@ -745,8 +751,8 @@ typedef struct Parser {
 	ErrorCount *errors;
 
 	u32 extra_token_count;
-	char **extra_tokens;
-	char **extra_token_strings;
+	String *extra_tokens;
+	String *extra_token_strings;
 	u32 ruleset_count;
 	RuleSet *rulesets;
 	u32 extra_block_count;
@@ -759,7 +765,7 @@ typedef struct Parser {
 #define FIRST_SET_TABLE(parser) ((u64 (*)[(parser)->bitset_width])(parser)->first_set_table)
 
 internal
-char *token_to_string(u32 token, char *extra_token_strings[]) {
+String token_to_string(u32 token, String extra_token_strings[]) {
 	if (token < TOK_EXTRA_BASE) {
 		return token_strings[token];
 	} else {
@@ -768,7 +774,7 @@ char *token_to_string(u32 token, char *extra_token_strings[]) {
 }
 
 internal
-char *symbol_to_string(Parser *parser, u32 symbol) {
+String symbol_to_string(Parser *parser, u32 symbol) {
 	if ((symbol & NONTERM_BIT) != 0) {
 		symbol &= ~NONTERM_BIT;
 		return parser->rulesets[symbol].nonterminal;
@@ -827,12 +833,15 @@ internal
 void print_parse_rules(Parser *parser) {
 	fprintf(stderr, "Parse rules:\n");
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
-		fprintf(stderr, "Rule set %u %s:\n", i, parser->rulesets[i].nonterminal);
+		String rs_name = parser->rulesets[i].nonterminal;
+		fprintf(stderr, "Rule set %u %.*s:\n", i, rs_name.len, rs_name.data);
 		foreach_rule (parser, &parser->rulesets[i], iter) {
 			fprintf(stderr, "  Rule %u: ", iter.index);
-			fprintf(stderr, "%s", symbol_to_string(parser, iter.rule->first));
+			String sym = symbol_to_string(parser, iter.rule->first);
+			fprintf(stderr, "%.*s", sym.len, sym.data);
 			if (iter.rule->second != TOK_NONE) {
-				fprintf(stderr, ", %s", symbol_to_string(parser, iter.rule->second));
+				sym = symbol_to_string(parser, iter.rule->second);
+				fprintf(stderr, ", %.*s", sym.len, sym.data);
 			}
 			fprintf(stderr, "\n");
 		}
@@ -845,7 +854,8 @@ internal
 void print_first_set_table(Parser *parser) {
 	fprintf(stderr, "First sets:\n");
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
-		fprintf(stderr, "Rule set %u %s: ", i, parser->rulesets[i].nonterminal);
+		String rs_name = parser->rulesets[i].nonterminal;
+		fprintf(stderr, "Rule set %u %.*s: ", i, rs_name.len, rs_name.data);
 		u32 token = 0;
 		b32 first = true;
 		for (u32 j = 0; j < parser->bitset_width; j++) {
@@ -857,7 +867,8 @@ void print_first_set_table(Parser *parser) {
 					} else {
 						fprintf(stderr, ", ");
 					}
-					fprintf(stderr, "%s", token_to_string(token, parser->extra_token_strings));
+					String tok = token_to_string(token, parser->extra_token_strings);
+					fprintf(stderr, "%.*s", tok.len, tok.data);
 				}
 			}
 		}
@@ -870,14 +881,16 @@ internal
 void print_parse_table(Parser *parser, u16 *table) {
 	fprintf(stderr, "Parse table:\n");
 	for (u32 i = 0; i < parser->ruleset_count; i++) {
-		fprintf(stderr, "Rule set %u %s:\n", i, parser->rulesets[i].nonterminal);
+		String rs_name = parser->rulesets[i].nonterminal;
+		fprintf(stderr, "Rule set %u %.*s:\n", i, rs_name.len, rs_name.data);
 		for (u32 j = 0; j < parser->rulesets[i].count; j++) {
 			fprintf(stderr, "  Rule %u: ", j);
 			while (true) {
 				u32 word = *table++;
 				b32 is_last = word & END_BIT;
 				u32 term = word &~ END_BIT;
-				fprintf(stderr, "%s", token_to_string(term, parser->extra_token_strings));
+				String tok = token_to_string(term, parser->extra_token_strings);
+				fprintf(stderr, "%.*s", tok.len, tok.data);
 				if (is_last) {
 					break;
 				}
@@ -927,21 +940,21 @@ void report_parser_conflict(Parser *parser, RuleSet *ruleset, Rule conflict_rule
 			}
 		}
 	}
-	char *conflict_first = symbol_to_string(parser, conflict_rule.first);
-	char *conflict_comma = "";
-	char *conflict_second = "";
+	String conflict_first = symbol_to_string(parser, conflict_rule.first);
+	String conflict_comma = S("");
+	String conflict_second = S("");
 	if (conflict_rule.second != TOK_NONE) {
-		conflict_comma = ", ";
+		conflict_comma = S(", ");
 		conflict_second = symbol_to_string(parser, conflict_rule.second);
 	}
-	char *existing_first = symbol_to_string(parser, existing_rule.first);
-	char *existing_comma = "";
-	char *existing_second = "";
+	String existing_first = symbol_to_string(parser, existing_rule.first);
+	String existing_comma = S("");
+	String existing_second = S("");
 	if (existing_rule.second != TOK_NONE) {
-		existing_comma = ", ";
+		existing_comma = S(", ");
 		existing_second = symbol_to_string(parser, existing_rule.second);
 	}
-	char *terminal = token_to_string(conflict_word * BITSET_WORD_SIZE + conflict_index,
+	String terminal = token_to_string(conflict_word * BITSET_WORD_SIZE + conflict_index,
 	                                 parser->extra_token_strings);
 	report_parse_error(parser, -1u, -1u,
 	                   ERROR "parse rule conflict on terminal %0", terminal);
@@ -1114,14 +1127,15 @@ void parse(SourceFile file, ErrorCount *errors) {
 	// TODO parse actions
 	// TODO 2 token lookahead
 	// TODO permit epsilons
-	char *extra_tokens[] = {
-		"__register_keyword",
-		"__register_rule_native_hex",
+	String extra_token_strings[] = {
+		S("\"__register_keyword\""),
+		S("\"__register_rule_native_hex\""),
 	};
-	char *extra_token_strings[] = {
-		"\"__register_keyword\"",
-		"\"__register_rule_native_hex\"",
-	};
+	String extra_tokens[array_count(extra_token_strings)];
+	for (u32 i = 0; i < array_count(extra_tokens); i++) {
+		extra_tokens[i].len = extra_token_strings[i].len - 2;
+		extra_tokens[i].data = extra_token_strings[i].data + 1;
+	}
 	u32 nt_base = __COUNTER__ + 1;
 	RuleSet rulesets[8];
 #define RULES2(first, second) {first, second, -1u, -1u, NULL}
@@ -1131,7 +1145,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 	u16 rs_idx_##cname = (u16)(__COUNTER__ - nt_base); \
 	u16 nt_##cname = NONTERM_BIT | rs_idx_##cname; \
 	assert(rs_idx_##cname < array_count(rulesets)); \
-	rulesets[rs_idx_##cname] = (RuleSet){ name, 0, VA_NARG(__VA_ARGS__) / 2, \
+	rulesets[rs_idx_##cname] = (RuleSet){ S(name), 0, VA_NARG(__VA_ARGS__) / 2, \
 		{ CAT(RULES, VA_NARG(__VA_ARGS__))(__VA_ARGS__) } }
 	RULESET(regkw_keyword, "keywords.register:keyword", TOK_STRING, TOK_NEWLINE);
 	RULESET(regkw, "keywords.register", TOK_EXTRA_BASE + 0, nt_regkw_keyword);
@@ -1238,10 +1252,10 @@ void parse(SourceFile file, ErrorCount *errors) {
 					// TODO make this more efficient
 					for (u32 i = 0; i < parser.extra_token_count; i++) {
 						// TODO limit size of extra tokens
-						u32 len = (u32)strlen(parser.extra_tokens[i]);
-						if (len == token_len &&
+						String tok = parser.extra_tokens[i];
+						if (tok.len == token_len &&
 						    memcmp(file.data + token_offset,
-						           parser.extra_tokens[i], len) == 0) {
+						           tok.data, tok.len) == 0) {
 							token = TOK_EXTRA_BASE + i;
 							break;
 						}
@@ -1254,8 +1268,8 @@ void parse(SourceFile file, ErrorCount *errors) {
 		if (elem.type == SE_TERMINAL) {
 			u32 symbol = elem.symbol;
 			if (token == symbol) {
-				fprintf(stderr, "PARSE: matched token %s\n",
-				        token_to_string(token, parser.extra_tokens));
+				String tokstr = token_to_string(token, parser.extra_tokens);
+				fprintf(stderr, "PARSE: matched token %.*s\n", tokstr.len, tokstr.data);
 				recovering = false;
 				want_token = true;
 			} else {
@@ -1291,7 +1305,8 @@ void parse(SourceFile file, ErrorCount *errors) {
 					stack_push_action(&stack, rule.middle_action);
 				}
 				stack_push_symbol(&stack, rule.first);
-				fprintf(stderr, "PARSE: matched nonterminal %s\n", rs->nonterminal);
+				fprintf(stderr, "PARSE: matched nonterminal %.*s\n",
+				        rs->nonterminal.len, rs->nonterminal.data);
 				continue;
 			}
 			b32 found = false;
@@ -1319,7 +1334,8 @@ void parse(SourceFile file, ErrorCount *errors) {
 						stack_push_action(&stack, rule.middle_action);
 					}
 					stack_push_symbol(&stack, rule.first);
-					fprintf(stderr, "PARSE: matched nonterminal %s\n", rs->nonterminal);
+					fprintf(stderr, "PARSE: matched nonterminal %.*s\n",
+					        rs->nonterminal.len, rs->nonterminal.data);
 					found = true;
 					break;
 				}
