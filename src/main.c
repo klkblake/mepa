@@ -198,7 +198,8 @@ void vreport_error(ErrorCount *errors, SourceFile *file, char *message, Location
 		vreport_error_line(errors, file->name, file->data + file->lines[location.line - 1].offset, message,
 		                   location, range_start, range_end, args);
 	} else {
-		vreport_error_line(errors, file->name, NULL, message, location, range_start, range_end, args);
+		Location empty = {};
+		vreport_error_line(errors, file->name, NULL, message, location, empty, empty, args);
 	}
 }
 
@@ -890,8 +891,13 @@ void report_parse_error(Parser *parser, u32 offset_start, u32 offset_end, char *
 	va_list args;
 	va_start(args, message);
 	Location start = location_for_offset(parser->file, offset_start);
-	Location end = location_for_offset(parser->file, offset_end);
-	vreport_error(parser->errors, parser->file, message, start, start, end, args);
+	if (offset_start <= offset_end) {
+		Location end = location_for_offset(parser->file, offset_end);
+		vreport_error(parser->errors, parser->file, message, start, start, end, args);
+	} else {
+		Location empty = {};
+		vreport_error_line(parser->errors, parser->file->name, NULL, message, start, empty, empty, args);
+	}
 	va_end(args);
 }
 
@@ -1180,7 +1186,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 			do {
 				token_offset = file.token_offsets[token_index++];
 				if (token_offset == file.len) {
-					token_end = token_offset;
+					token_end = token_offset - 1;
 					token_len = 0;
 					token_first = token_second = 0;
 				} else {
