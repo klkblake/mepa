@@ -715,8 +715,10 @@ String token_strings[] = {
 };
 
 struct Parser;
-typedef void (*Action)(struct Parser *parser);
+struct ObjectStack;
+typedef void (*Action)(struct Parser *parser, struct ObjectStack *stack);
 
+// TODO pack rule, resize ruleset and extra rules
 // Nonterminal if NONTERM_BIT is set, terminal otherwise
 typedef struct {
 	u16 first; // TODO check for overflow when adding rules
@@ -724,6 +726,7 @@ typedef struct {
 	u32 offset_start;
 	u32 offset_end;
 	Action middle_action;
+	u8 push_mask;
 } Rule;
 
 typedef struct {
@@ -750,9 +753,10 @@ typedef struct Parser {
 	SourceFile *file;
 	ErrorCount *errors;
 
+	u32 extra_token_cap;
 	u32 extra_token_count;
-	String *extra_tokens;
 	String *extra_token_strings;
+	String *extra_tokens;
 	u32 ruleset_count;
 	RuleSet *rulesets;
 	u32 extra_block_count;
@@ -1073,9 +1077,36 @@ void regen_parse_table(Parser *parser) {
 //  - Structs track highest field that they have allocated memory for.
 //  - If allocated in pools, each pool could track the highest field
 
+typedef struct ObjectStack {
+	String *data;
+	u32 len;
+	u32 cap;
+} ObjectStack;
+
 internal
-void register_keyword(Parser *parser) {
-	printf("Parser %p\n", (void *)parser);
+void object_stack_push(ObjectStack *stack, String str) {
+	if (stack->len >= stack->cap) {
+		stack->cap += stack->cap >> 1;
+		stack->data = realloc(stack->data, stack->cap * sizeof(String));
+	}
+	stack->data[stack->len++] = str;
+}
+
+internal
+void register_keyword(Parser *parser, ObjectStack *stack) {
+	printf("Parser %p, stack is %p\n", (void *)parser, (void *)stack);
+	String str = stack->data[--stack->len];
+	printf("Token literal text was %.*s\n", str.len, str.data);
+	// TODO interpret string, including handling missing quotes
+	if (parser->extra_token_count >= parser->extra_token_cap) {
+		parser->extra_token_cap += parser->extra_token_cap >> 1;
+		parser->extra_token_strings = realloc(parser->extra_token_strings,
+		                                      parser->extra_token_cap * sizeof(String));
+		parser->extra_tokens = realloc(parser->extra_tokens, parser->extra_token_cap * sizeof(String));
+	}
+	u32 idx = parser->extra_token_count++;
+	parser->extra_token_strings[idx] = str;
+	parser->extra_tokens[idx] = (String){str.len - 2, str.data + 1};
 }
 
 #define SE_TERMINAL    0
@@ -1085,7 +1116,10 @@ void register_keyword(Parser *parser) {
 typedef struct {
 	u16 type;
 	union {
-		u16 symbol;
+		struct {
+			b32 should_push;
+			u16 symbol;
+		};
 		Action action;
 	};
 } StackElem;
@@ -1106,8 +1140,8 @@ void stack_push(Stack *stack, StackElem elem) {
 }
 
 internal
-void stack_push_symbol(Stack *stack, u16 sym) {
-	stack_push(stack, (StackElem){!!(sym & NONTERM_BIT), {sym &~ NONTERM_BIT}});
+void stack_push_symbol(Stack *stack, u16 sym, b32 should_push) {
+	stack_push(stack, (StackElem){!!(sym & NONTERM_BIT), {{should_push, sym &~ NONTERM_BIT}}});
 }
 
 internal
@@ -1138,7 +1172,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 	}
 	u32 nt_base = __COUNTER__ + 1;
 	RuleSet rulesets[8];
-#define RULES2(first, second) {first, second, -1u, -1u, NULL}
+#define RULES2(first, second) {first, second, -1u, -1u, NULL, 0}
 #define RULES4(f0, s0, f1, s1) RULES2(f0, s0), RULES2(f1, s1)
 #define RULES6(f0, s0, f1, s1, f2, s2) RULES4(f0, s0, f1, s1), RULES2(f2, s2)
 #define RULESET(cname, name, ...) \
@@ -1167,12 +1201,15 @@ void parse(SourceFile file, ErrorCount *errors) {
 #undef RULES4
 #undef RULES2
 	rulesets[rs_idx_regkw_keyword].rules[0].middle_action = register_keyword;
+	rulesets[rs_idx_regkw_keyword].rules[0].push_mask = 1;
+	static_assert(array_count(extra_tokens) <= 8, "extra_tokens_cap too small");
 	Parser parser = {
 		&file,
 		errors,
+		8,
 		array_count(extra_tokens),
-		memdup(extra_tokens, sizeof(extra_tokens)),
-		memdup(extra_token_strings, sizeof(extra_token_strings)),
+		memcpy(malloc(8 * sizeof(String)), extra_token_strings, sizeof(extra_token_strings)),
+		memcpy(malloc(8 * sizeof(String)), extra_tokens, sizeof(extra_tokens)),
 		array_count(rulesets),
 		memdup(rulesets, sizeof(rulesets)),
 		0,
@@ -1207,12 +1244,16 @@ void parse(SourceFile file, ErrorCount *errors) {
 	Stack stack = {};
 	stack.cap = 8;
 	stack.data = malloc(stack.cap * sizeof(StackElem));
+	ObjectStack obj_stack = {};
+	obj_stack.cap = 8;
+	obj_stack.data = malloc(obj_stack.cap * sizeof(String));
 	b32 recovering = false;
 	b32 found_error = false;
 	u32 token_index = 0;
 	// These are only initialised here because the compiler can't tell that
 	// they will be initialised before use
 	u32 token_offset = 0, token_end = 0;
+	u32 token_len = 0;
 	u32 token = TOK_NONE;
 	b32 want_token = true;
 	// TODO error recovery here needs a lot of work
@@ -1222,11 +1263,10 @@ void parse(SourceFile file, ErrorCount *errors) {
 				break;
 			}
 			want_token = true;
-			stack_push_symbol(&stack, nt_toplevel);
+			stack_push_symbol(&stack, nt_toplevel, false);
 		}
 		// TODO should we precompute the token type?
 		if (want_token) {
-			u32 token_len;
 			u8 token_first;
 			u8 token_second;
 			do {
@@ -1268,16 +1308,19 @@ void parse(SourceFile file, ErrorCount *errors) {
 		if (elem.type == SE_TERMINAL) {
 			u32 symbol = elem.symbol;
 			if (token == symbol) {
-				String tokstr = token_to_string(token, parser.extra_tokens);
+				String tokstr = token_to_string(token, parser.extra_token_strings);
 				fprintf(stderr, "PARSE: matched token %.*s\n", tokstr.len, tokstr.data);
+				if (elem.should_push) {
+					object_stack_push(&obj_stack, (String){token_len, file.data + token_offset});
+				}
 				recovering = false;
 				want_token = true;
 			} else {
 				if (!recovering) {
 					report_parse_error(&parser, token_offset, token_end,
 					                   ERROR "mismatched token, expected %0, got %1",
-					                   token_to_string(symbol, parser.extra_tokens),
-					                   token_to_string(token, parser.extra_tokens));
+					                   token_to_string(symbol, parser.extra_token_strings),
+					                   token_to_string(token, parser.extra_token_strings));
 					found_error = true;
 					recovering = true;
 				}
@@ -1299,12 +1342,12 @@ void parse(SourceFile file, ErrorCount *errors) {
 			if (rs->count == 1) {
 				Rule rule = rs->rules[0];
 				if (rule.second != TOK_NONE) {
-					stack_push_symbol(&stack, rule.second);
+					stack_push_symbol(&stack, rule.second, rule.push_mask & 0x2);
 				}
 				if (rule.middle_action) {
 					stack_push_action(&stack, rule.middle_action);
 				}
-				stack_push_symbol(&stack, rule.first);
+				stack_push_symbol(&stack, rule.first, rule.push_mask & 0x1);
 				fprintf(stderr, "PARSE: matched nonterminal %.*s\n",
 				        rs->nonterminal.len, rs->nonterminal.data);
 				continue;
@@ -1328,12 +1371,12 @@ void parse(SourceFile file, ErrorCount *errors) {
 						rule = rules->rules[i];
 					}
 					if (rule.second != TOK_NONE) {
-						stack_push_symbol(&stack, rule.second);
+						stack_push_symbol(&stack, rule.second, rule.push_mask & 0x2);
 					}
 					if (rule.middle_action) {
 						stack_push_action(&stack, rule.middle_action);
 					}
-					stack_push_symbol(&stack, rule.first);
+					stack_push_symbol(&stack, rule.first, rule.push_mask & 0x1);
 					fprintf(stderr, "PARSE: matched nonterminal %.*s\n",
 					        rs->nonterminal.len, rs->nonterminal.data);
 					found = true;
@@ -1348,7 +1391,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 				if (!recovering) {
 					report_parse_error(&parser, token_offset, token_end,
 					                   ERROR "no match for token %0 in ruleset \"%1\"",
-					                   token_to_string(token, parser.extra_tokens),
+					                   token_to_string(token, parser.extra_token_strings),
 					                   rs->nonterminal);
 					found_error = true;
 					recovering = true;
@@ -1357,7 +1400,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 			}
 		} else {
 			assert(elem.type == SE_ACTION);
-			elem.action(&parser);
+			elem.action(&parser, &obj_stack);
 		}
 	}
 }
