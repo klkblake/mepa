@@ -1222,15 +1222,11 @@ void parse(SourceFile file, ErrorCount *errors) {
 						recovering = true;
 					}
 					assert(symbol != TOK_EOF);
-					if (token == TOK_EOF) {
-						break;
-					}
 					if (TOK_BRACKETS_START <= symbol && symbol <= TOK_BRACKETS_END &&
 					    TOK_BRACKETS_START <= token && token <= TOK_BRACKETS_END) {
 						// TODO also do this if edit distance is sufficiently small
 						break;
 					}
-					// TODO make sure we don't back out all the way and end the parse
 				}
 			} else {
 				symbol &= ~NONTERM_BIT;
@@ -1293,8 +1289,6 @@ void parse(SourceFile file, ErrorCount *errors) {
 			}
 		}
 	}
-	// TODO handle ran out of stack -- we need to check if this was a failure
-
 }
 
 // Many arrays have a 32bit count. We ensure that these do not overflow by
