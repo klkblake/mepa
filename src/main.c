@@ -708,12 +708,16 @@ char *token_strings[] = {
 	"<ident>",
 };
 
+struct Parser;
+typedef void (*Action)(struct Parser *parser);
+
 // Nonterminal if NONTERM_BIT is set, terminal otherwise
 typedef struct {
 	u16 first; // TODO check for overflow when adding rules
 	u16 second;
 	u32 offset_start;
 	u32 offset_end;
+	Action middle_action;
 } Rule;
 
 typedef struct {
@@ -736,7 +740,7 @@ typedef struct {
 
 #define BITSET_WORD_SIZE (sizeof(u64) * 8)
 
-typedef struct {
+typedef struct Parser {
 	SourceFile *file;
 	ErrorCount *errors;
 
@@ -1050,31 +1054,58 @@ void regen_parse_table(Parser *parser) {
 	free(first_set_table);
 }
 
+// TODO extensible objects
+//  - Field names are namespaced in structs
+//  - Names map to field indexes and offsets.
+//  - Structs track highest field that they have allocated memory for.
+//  - If allocated in pools, each pool could track the highest field
+
+internal
+void register_keyword(Parser *parser) {
+	printf("Parser %p\n", (void *)parser);
+}
+
+#define SE_TERMINAL    0
+#define SE_NONTERMINAL 1
+#define SE_ACTION      2
+
 typedef struct {
-	u16 *data;
+	u16 type;
+	union {
+		u16 symbol;
+		Action action;
+	};
+} StackElem;
+
+typedef struct {
+	StackElem *data;
 	u32 len;
 	u32 cap;
 } Stack;
 
 internal
-void stack_push(Stack *stack, u16 sym) {
+void stack_push(Stack *stack, StackElem elem) {
 	if (stack->len >= stack->cap) {
 		stack->cap += stack->cap >> 1;
-		stack->data = realloc(stack->data, stack->cap);
+		stack->data = realloc(stack->data, stack->cap * sizeof(StackElem));
 	}
-	stack->data[stack->len++] = sym;
+	stack->data[stack->len++] = elem;
+}
+
+internal
+void stack_push_symbol(Stack *stack, u16 sym) {
+	stack_push(stack, (StackElem){!!(sym & NONTERM_BIT), {sym &~ NONTERM_BIT}});
+}
+
+internal
+void stack_push_action(Stack *stack, Action action) {
+	stack_push(stack, (StackElem){SE_ACTION, {.action = action}});
 }
 
 internal
 void *memdup(void *src, u64 size) {
 	return memcpy(malloc(size), src, size);
 }
-
-// TODO extensible objects
-//  - Field names are namespaced in structs
-//  - Names map to field indexes and offsets.
-//  - Structs track highest field that they have allocated memory for.
-//  - If allocated in pools, each pool could track the highest field
 
 internal
 void parse(SourceFile file, ErrorCount *errors) {
@@ -1093,7 +1124,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 	};
 	u32 nt_base = __COUNTER__ + 1;
 	RuleSet rulesets[8];
-#define RULES2(first, second) {first, second, -1u, -1u}
+#define RULES2(first, second) {first, second, -1u, -1u, NULL}
 #define RULES4(f0, s0, f1, s1) RULES2(f0, s0), RULES2(f1, s1)
 #define RULES6(f0, s0, f1, s1, f2, s2) RULES4(f0, s0, f1, s1), RULES2(f2, s2)
 #define RULESET(cname, name, ...) \
@@ -1121,6 +1152,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 #undef RULES6
 #undef RULES4
 #undef RULES2
+	rulesets[rs_idx_regkw_keyword].rules[0].middle_action = register_keyword;
 	Parser parser = {
 		&file,
 		errors,
@@ -1160,7 +1192,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 	regen_parse_table(&parser);
 	Stack stack = {};
 	stack.cap = 8;
-	stack.data = malloc(stack.cap * sizeof(u16));
+	stack.data = malloc(stack.cap * sizeof(StackElem));
 	b32 recovering = false;
 	b32 found_error = false;
 	u32 token_index = 0;
@@ -1176,7 +1208,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 				break;
 			}
 			want_token = true;
-			stack_push(&stack, nt_toplevel);
+			stack_push_symbol(&stack, nt_toplevel);
 		}
 		// TODO should we precompute the token type?
 		if (want_token) {
@@ -1218,8 +1250,9 @@ void parse(SourceFile file, ErrorCount *errors) {
 			}
 			want_token = false;
 		}
-		u32 symbol = stack.data[--stack.len];
-		if ((symbol & NONTERM_BIT) == 0) {
+		StackElem elem = stack.data[--stack.len];
+		if (elem.type == SE_TERMINAL) {
+			u32 symbol = elem.symbol;
 			if (token == symbol) {
 				fprintf(stderr, "PARSE: matched token %s\n",
 				        token_to_string(token, parser.extra_tokens));
@@ -1241,8 +1274,9 @@ void parse(SourceFile file, ErrorCount *errors) {
 					want_token = true;
 				}
 			}
-		} else {
-			if (token == TOK_EOF && symbol == nt_toplevel && stack.len == 0) {
+		} else if (elem.type == SE_NONTERMINAL) {
+			u32 symbol = elem.symbol;
+			if (token == TOK_EOF && symbol == rs_idx_toplevel && stack.len == 0) {
 				break;
 			}
 			symbol &= ~NONTERM_BIT;
@@ -1251,9 +1285,12 @@ void parse(SourceFile file, ErrorCount *errors) {
 			if (rs->count == 1) {
 				Rule rule = rs->rules[0];
 				if (rule.second != TOK_NONE) {
-					stack_push(&stack, rule.second);
+					stack_push_symbol(&stack, rule.second);
 				}
-				stack_push(&stack, rule.first);
+				if (rule.middle_action) {
+					stack_push_action(&stack, rule.middle_action);
+				}
+				stack_push_symbol(&stack, rule.first);
 				fprintf(stderr, "PARSE: matched nonterminal %s\n", rs->nonterminal);
 				continue;
 			}
@@ -1276,11 +1313,13 @@ void parse(SourceFile file, ErrorCount *errors) {
 						rule = rules->rules[i];
 					}
 					if (rule.second != TOK_NONE) {
-						stack_push(&stack, rule.second);
+						stack_push_symbol(&stack, rule.second);
 					}
-					stack_push(&stack, rule.first);
-					fprintf(stderr, "PARSE: matched nonterminal %s\n",
-					        rs->nonterminal);
+					if (rule.middle_action) {
+						stack_push_action(&stack, rule.middle_action);
+					}
+					stack_push_symbol(&stack, rule.first);
+					fprintf(stderr, "PARSE: matched nonterminal %s\n", rs->nonterminal);
 					found = true;
 					break;
 				}
@@ -1300,6 +1339,9 @@ void parse(SourceFile file, ErrorCount *errors) {
 				}
 				// TODO handle no match
 			}
+		} else {
+			assert(elem.type == SE_ACTION);
+			elem.action(&parser);
 		}
 	}
 }
