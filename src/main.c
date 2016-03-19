@@ -1086,7 +1086,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 		"\"__register_rule_native_hex\"",
 	};
 	u32 nt_base = __COUNTER__ + 1;
-	RuleSet rulesets[9];
+	RuleSet rulesets[8];
 #define RULES2(first, second) {first, second, -1u, -1u}
 #define RULES4(f0, s0, f1, s1) RULES2(f0, s0), RULES2(f1, s1)
 #define RULES6(f0, s0, f1, s1, f2, s2) RULES4(f0, s0, f1, s1), RULES2(f2, s2)
@@ -1111,10 +1111,6 @@ void parse(SourceFile file, ErrorCount *errors) {
 	        TOK_NEWLINE, TOK_NONE,
 	        nt_regkw, TOK_NONE,
 		nt_regrule, TOK_NONE);
-	// TODO this shouldn't be a rule
-	RULESET(start, "start",
-		nt_toplevel, nt_start,
-		TOK_EOF, TOK_NONE);
 #undef RULESET
 #undef RULES6
 #undef RULES4
@@ -1159,132 +1155,138 @@ void parse(SourceFile file, ErrorCount *errors) {
 	Stack stack = {};
 	stack.cap = 8;
 	stack.data = malloc(stack.cap * sizeof(u16));
-	stack_push(&stack, nt_start);
 	b32 recovering = false;
 	b32 found_error = false;
 	u32 token_index = 0;
-	while (stack.len) {
-		// TODO should we precompute the token type?
-		u32 token_offset, token_end;
-		u32 token_len;
-		u8 token_first;
-		u8 token_second;
-		do {
-			token_offset = file.token_offsets[token_index++];
-			if (token_offset == file.len) {
-				token_end = token_offset;
-				token_len = 0;
-				token_first = token_second = 0;
-			} else {
-				token_end = file.token_offsets[token_index] - 1;
-				token_len = token_end - token_offset + 1;
-				token_first = file.data[token_offset];
-				token_second = token_len >= 2 ? file.data[token_offset + 1] : 0;
-			}
-		} while (token_first == ' ' ||
-		         token_first == '/' && (token_second == '/' || token_second == '*'));
-		u32 token;
-		if (token_len == 0) {
-			token = TOK_EOF;
-		} else {
-			token = token_map[token_first];
-			if (token == 0) {
-				token = TOK_IDENT;
-				// TODO make this more efficient
-				for (u32 i = 0; i < parser.extra_token_count; i++) {
-					// TODO limit size of extra tokens
-					u32 len = (u32)strlen(parser.extra_tokens[i]);
-					if (len == token_len &&
-					    memcmp(file.data + token_offset,
-					           parser.extra_tokens[i],
-					           len) == 0) {
-						token = TOK_EXTRA_BASE + i;
-						break;
-					}
-				}
-			}
-		}
+	u32 token = TOK_NONE;
+	// TODO error recovery here needs a lot of work
+	while (token != TOK_EOF) {
+		stack_push(&stack, nt_toplevel);
 		while (stack.len) {
-			u32 symbol = stack.data[--stack.len];
-			if ((symbol & NONTERM_BIT) == 0) {
-				if (token == symbol) {
-					fprintf(stderr, "PARSE: matched token %s\n",
-					        token_to_string(token, parser.extra_tokens));
-					recovering = false;
-					break;
+			// TODO should we precompute the token type?
+			u32 token_offset, token_end;
+			u32 token_len;
+			u8 token_first;
+			u8 token_second;
+			do {
+				token_offset = file.token_offsets[token_index++];
+				if (token_offset == file.len) {
+					token_end = token_offset;
+					token_len = 0;
+					token_first = token_second = 0;
 				} else {
-					if (!recovering) {
-						report_parse_error(&parser, token_offset, token_end,
-						                   ERROR "mismatched token, expected %0, got %1",
-						                   token_to_string(symbol, parser.extra_tokens),
-						                   token_to_string(token, parser.extra_tokens));
-						found_error = true;
-						recovering = true;
+					token_end = file.token_offsets[token_index] - 1;
+					token_len = token_end - token_offset + 1;
+					token_first = file.data[token_offset];
+					token_second = token_len >= 2 ? file.data[token_offset + 1] : 0;
+				}
+			} while (token_first == ' ' ||
+			         token_first == '/' && (token_second == '/' || token_second == '*'));
+			if (token_len == 0) {
+				token = TOK_EOF;
+			} else {
+				token = token_map[token_first];
+				if (token == 0) {
+					token = TOK_IDENT;
+					// TODO make this more efficient
+					for (u32 i = 0; i < parser.extra_token_count; i++) {
+						// TODO limit size of extra tokens
+						u32 len = (u32)strlen(parser.extra_tokens[i]);
+						if (len == token_len &&
+						    memcmp(file.data + token_offset,
+						           parser.extra_tokens[i],
+						           len) == 0) {
+							token = TOK_EXTRA_BASE + i;
+							break;
+						}
 					}
-					assert(symbol != TOK_EOF);
-					if (TOK_BRACKETS_START <= symbol && symbol <= TOK_BRACKETS_END &&
-					    TOK_BRACKETS_START <= token && token <= TOK_BRACKETS_END) {
-						// TODO also do this if edit distance is sufficiently small
+				}
+			}
+			while (stack.len) {
+				u32 symbol = stack.data[--stack.len];
+				if ((symbol & NONTERM_BIT) == 0) {
+					if (token == symbol) {
+						fprintf(stderr, "PARSE: matched token %s\n",
+						        token_to_string(token, parser.extra_tokens));
+						recovering = false;
+						break;
+					} else {
+						if (!recovering) {
+							report_parse_error(&parser, token_offset, token_end,
+							                   ERROR "mismatched token, expected %0, got %1",
+							                   token_to_string(symbol, parser.extra_tokens),
+							                   token_to_string(token, parser.extra_tokens));
+							found_error = true;
+							recovering = true;
+						}
+						assert(symbol != TOK_EOF);
+						if (TOK_BRACKETS_START <= symbol && symbol <= TOK_BRACKETS_END &&
+						    TOK_BRACKETS_START <= token && token <= TOK_BRACKETS_END) {
+							// TODO also do this if edit distance is sufficiently small
+							break;
+						}
+					}
+				} else {
+					if (token == TOK_EOF && symbol == nt_toplevel && stack.len == 0) {
 						break;
 					}
-				}
-			} else {
-				symbol &= ~NONTERM_BIT;
-				u16 *entry = parser.parse_table + parser.parse_table_index[symbol];
-				RuleSet *rs = &parser.rulesets[symbol];
-				if (rs->count == 1) {
-					Rule rule = rs->rules[0];
-					if (rule.second != TOK_NONE) {
-						stack_push(&stack, rule.second);
+					symbol &= ~NONTERM_BIT;
+					u16 *entry = parser.parse_table + parser.parse_table_index[symbol];
+					RuleSet *rs = &parser.rulesets[symbol];
+					if (rs->count == 1) {
+						Rule rule = rs->rules[0];
+						if (rule.second != TOK_NONE) {
+							stack_push(&stack, rule.second);
+						}
+						stack_push(&stack, rule.first);
+						fprintf(stderr, "PARSE: matched nonterminal %s\n", rs->nonterminal);
+						continue;
 					}
-					stack_push(&stack, rule.first);
-					fprintf(stderr, "PARSE: matched nonterminal %s\n", rs->nonterminal);
-					continue;
-				}
-				b32 found = false;
-				for (u32 i = 0; i < rs->count && !found; i++) {
-					while (true) {
-						u32 word = *entry++;
-						b32 is_last = word & END_BIT;
-						u32 term = word &~ END_BIT;
-						if (term == token) {
-							Rule rule;
-							if (i < array_count(rs->rules)) {
-								rule = rs->rules[i];
-							} else {
-								i -= array_count(rs->rules);
-								ExtraRules *rules = &parser.extra_rules[rs->next];
-								while (i >= array_count(rules->rules)) {
-									i -= array_count(rules->rules);
-									rules = &parser.extra_rules[rules->next];
+					b32 found = false;
+					for (u32 i = 0; i < rs->count && !found; i++) {
+						while (true) {
+							u32 word = *entry++;
+							b32 is_last = word & END_BIT;
+							u32 term = word &~ END_BIT;
+							if (term == token) {
+								Rule rule;
+								if (i < array_count(rs->rules)) {
+									rule = rs->rules[i];
+								} else {
+									i -= array_count(rs->rules);
+									ExtraRules *rules = &parser.extra_rules[rs->next];
+									while (i >= array_count(rules->rules)) {
+										i -= array_count(rules->rules);
+										rules = &parser.extra_rules[rules->next];
+									}
+									rule = rules->rules[i];
 								}
-								rule = rules->rules[i];
+								if (rule.second != TOK_NONE) {
+									stack_push(&stack, rule.second);
+								}
+								stack_push(&stack, rule.first);
+								fprintf(stderr, "PARSE: matched nonterminal %s\n",
+								        rs->nonterminal);
+								found = true;
+								break;
 							}
-							if (rule.second != TOK_NONE) {
-								stack_push(&stack, rule.second);
+							if (is_last) {
+								break;
 							}
-							stack_push(&stack, rule.first);
-							fprintf(stderr, "PARSE: matched nonterminal %s\n",
-							        rs->nonterminal);
-							found = true;
-							break;
-						}
-						if (is_last) {
-							break;
 						}
 					}
-				}
-				if (!found) {
-					// TODO dump options
-					if (!recovering) {
-						report_parse_error(&parser, token_offset, token_end,
-						                   ERROR "no match for token %0 in ruleset \"%1\"",
-						                   token_to_string(token, parser.extra_tokens),
-						                   rs->nonterminal);
-						found_error = true;
-						recovering = true;
+					if (!found) {
+						// TODO dump options
+						if (!recovering) {
+							report_parse_error(&parser, token_offset, token_end,
+							                   ERROR "no match for token %0 in ruleset \"%1\"",
+							                   token_to_string(token, parser.extra_tokens),
+							                   rs->nonterminal);
+							found_error = true;
+							recovering = true;
+						}
+						// TODO handle no match
 					}
-					// TODO handle no match
 				}
 			}
 		}
