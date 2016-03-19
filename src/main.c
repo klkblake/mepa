@@ -1075,6 +1075,8 @@ void parse(SourceFile file, ErrorCount *errors) {
 	// TODO detect leading indent
 	// TODO error productions
 	// TODO parse actions
+	// TODO 2 token lookahead
+	// TODO permit epsilons
 	char *extra_tokens[] = {
 		"__register_keyword",
 		"__register_rule_native_hex",
@@ -1206,6 +1208,8 @@ void parse(SourceFile file, ErrorCount *errors) {
 			u32 symbol = stack.data[--stack.len];
 			if ((symbol & NONTERM_BIT) == 0) {
 				if (token == symbol) {
+					fprintf(stderr, "PARSE: matched token %s\n",
+					        token_to_string(token, parser.extra_tokens));
 					recovering = false;
 					break;
 				} else {
@@ -1238,6 +1242,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 						stack_push(&stack, rule.second);
 					}
 					stack_push(&stack, rule.first);
+					fprintf(stderr, "PARSE: matched nonterminal %s\n", rs->nonterminal);
 					continue;
 				}
 				b32 found = false;
@@ -1263,6 +1268,8 @@ void parse(SourceFile file, ErrorCount *errors) {
 								stack_push(&stack, rule.second);
 							}
 							stack_push(&stack, rule.first);
+							fprintf(stderr, "PARSE: matched nonterminal %s\n",
+							        rs->nonterminal);
 							found = true;
 							break;
 						}
