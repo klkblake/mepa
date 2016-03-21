@@ -1077,6 +1077,11 @@ void regen_parse_table(Parser *parser) {
 //  - Structs track highest field that they have allocated memory for.
 //  - If allocated in pools, each pool could track the highest field
 
+typedef struct {
+	u32 offset_start;
+	u32 offset_end;
+} Token;
+
 typedef struct ObjectStack {
 	String *data;
 	u32 len;
@@ -1098,6 +1103,7 @@ void register_keyword(Parser *parser, ObjectStack *stack) {
 	String str = stack->data[--stack->len];
 	printf("Token literal text was %.*s\n", str.len, str.data);
 	// TODO interpret string, including handling missing quotes
+	// TODO ensure that it is a valid identifier
 	if (parser->extra_token_count >= parser->extra_token_cap) {
 		parser->extra_token_cap += parser->extra_token_cap >> 1;
 		parser->extra_token_strings = realloc(parser->extra_token_strings,
@@ -1107,6 +1113,16 @@ void register_keyword(Parser *parser, ObjectStack *stack) {
 	u32 idx = parser->extra_token_count++;
 	parser->extra_token_strings[idx] = str;
 	parser->extra_tokens[idx] = (String){str.len - 2, str.data + 1};
+}
+
+internal
+void register_rule_init(Parser *parser, ObjectStack *stack) {
+	printf("Initialise rule\n");
+}
+
+internal
+void register_rule_finish(Parser *parser, ObjectStack *stack) {
+	printf("Finish rule\n");
 }
 
 #define SE_TERMINAL    0
@@ -1171,7 +1187,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 		extra_tokens[i].data = extra_token_strings[i].data + 1;
 	}
 	u32 nt_base = __COUNTER__ + 1;
-	RuleSet rulesets[8];
+	RuleSet rulesets[11];
 #define RULES2(first, second) {first, second, -1u, -1u, NULL, 0}
 #define RULES4(f0, s0, f1, s1) RULES2(f0, s0), RULES2(f1, s1)
 #define RULES6(f0, s0, f1, s1, f2, s2) RULES4(f0, s0, f1, s1), RULES2(f2, s2)
@@ -1187,7 +1203,10 @@ void parse(SourceFile file, ErrorCount *errors) {
 	        TOK_RBRACE, TOK_NEWLINE,
 	        TOK_NEWLINE, nt_regrule_body,
 	        TOK_NUMBER, nt_regrule_body);
-	RULESET(regrule_body_start, "rules.register.native.hex:body_start", TOK_LBRACE, nt_regrule_body);
+	RULESET(regrule_push_mask, "rules.register.native.hex:push_mask", TOK_NUMBER, nt_regrule_body);
+	RULESET(regrule_second, "rules.register.native.hex:second", TOK_NUMBER, nt_regrule_push_mask);
+	RULESET(regrule_first, "rules.register.native.hex:first", TOK_NUMBER, nt_regrule_second);
+	RULESET(regrule_body_start, "rules.register.native.hex:body_start", TOK_LBRACE, nt_regrule_first);
 	// TODO good position for adding an extension to test extensibility
 	RULESET(regrule_arch, "rules.register.native.hex:arch", TOK_IDENT, nt_regrule_body_start);
 	RULESET(regrule_name, "rules.register.native.hex:name", TOK_STRING, nt_regrule_arch);
@@ -1200,8 +1219,20 @@ void parse(SourceFile file, ErrorCount *errors) {
 #undef RULES6
 #undef RULES4
 #undef RULES2
-	rulesets[rs_idx_regkw_keyword].rules[0].middle_action = register_keyword;
-	rulesets[rs_idx_regkw_keyword].rules[0].push_mask = 1;
+
+#define PUSH(name, idx, mask) rulesets[rs_idx_ ## name].rules[idx].push_mask = mask
+#define ACTION(name, idx, func, mask) rulesets[rs_idx_ ## name].rules[idx].middle_action = func; PUSH(name, idx, mask)
+	ACTION(regkw_keyword, 0, register_keyword, 1);
+	PUSH(regkw_keyword, 0, 1);
+	PUSH(regrule, 0, 1);
+	PUSH(regrule_name, 0, 1);
+	PUSH(regrule_arch, 0, 1);
+	PUSH(regrule_first, 0, 1);
+	PUSH(regrule_second, 0, 1);
+	ACTION(regrule_push_mask, 0, register_rule_init, 1);
+	ACTION(regrule_body, 0, register_rule_finish, 0);
+#undef ACTION
+#undef PUSH
 	static_assert(array_count(extra_tokens) <= 8, "extra_tokens_cap too small");
 	Parser parser = {
 		&file,
