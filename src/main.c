@@ -1200,12 +1200,18 @@ void parse(SourceFile file, ErrorCount *errors) {
 	RULESET(regkw_keyword, "keywords.register:keyword", TOK_STRING, TOK_NEWLINE);
 	RULESET(regkw, "keywords.register", TOK_EXTRA_BASE + 0, nt_regkw_keyword);
 	RULESET(regrule_body, "rules.register.native.hex:body",
-	        TOK_RBRACE, TOK_NEWLINE,
 	        TOK_NEWLINE, nt_regrule_body,
-	        TOK_NUMBER, nt_regrule_body);
-	RULESET(regrule_push_mask, "rules.register.native.hex:push_mask", TOK_NUMBER, nt_regrule_body);
-	RULESET(regrule_second, "rules.register.native.hex:second", TOK_NUMBER, nt_regrule_push_mask);
-	RULESET(regrule_first, "rules.register.native.hex:first", TOK_NUMBER, nt_regrule_second);
+	        TOK_NUMBER, nt_regrule_body,
+	        TOK_RBRACE, TOK_NEWLINE);
+	RULESET(regrule_push_mask, "rules.register.native.hex:push_mask",
+	        TOK_NEWLINE, nt_regrule_push_mask,
+		TOK_NUMBER, nt_regrule_body);
+	RULESET(regrule_second, "rules.register.native.hex:second",
+	        TOK_NEWLINE, nt_regrule_second,
+		TOK_NUMBER, nt_regrule_push_mask);
+	RULESET(regrule_first, "rules.register.native.hex:first",
+	        TOK_NEWLINE, nt_regrule_first,
+	        TOK_NUMBER, nt_regrule_second);
 	RULESET(regrule_body_start, "rules.register.native.hex:body_start", TOK_LBRACE, nt_regrule_first);
 	// TODO good position for adding an extension to test extensibility
 	RULESET(regrule_arch, "rules.register.native.hex:arch", TOK_IDENT, nt_regrule_body_start);
@@ -1227,10 +1233,11 @@ void parse(SourceFile file, ErrorCount *errors) {
 	PUSH(regrule, 0, 1);
 	PUSH(regrule_name, 0, 1);
 	PUSH(regrule_arch, 0, 1);
-	PUSH(regrule_first, 0, 1);
-	PUSH(regrule_second, 0, 1);
-	ACTION(regrule_push_mask, 0, register_rule_init, 1);
-	ACTION(regrule_body, 0, register_rule_finish, 0);
+	PUSH(regrule_first, 1, 1);
+	PUSH(regrule_second, 1, 1);
+	ACTION(regrule_push_mask, 1, register_rule_init, 1);
+	PUSH(regrule_body, 1, 1);
+	ACTION(regrule_body, 2, register_rule_finish, 0);
 #undef ACTION
 #undef PUSH
 	static_assert(array_count(extra_tokens) <= 8, "extra_tokens_cap too small");
