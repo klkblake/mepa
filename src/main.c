@@ -177,7 +177,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		col_end = range_end.column - 1;
 	}
 	fputs(term_green, stderr);
-	for (u32 i = 0; i < size; i++) {
+	for (u32 i = 0; i < size + 1; i++) {
 		u8 c;
 		if (i == location.column - 1) {
 			c = '^';
@@ -186,7 +186,7 @@ void vreport_error_line(ErrorCount *errors, char *file, u8 *line, char *message,
 		} else {
 			c = ' ';
 		}
-		if (line[i] == '\t') {
+		if (i < size && line[i] == '\t') {
 			for (u32 k = 0; k < 8; k++) {
 				fputc(c, stderr);
 			}
