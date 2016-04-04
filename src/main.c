@@ -749,6 +749,110 @@ typedef struct {
 
 #define BITSET_WORD_SIZE (sizeof(u64) * 8)
 
+#define BLOCK_SHIFT 9
+#define BLOCK_SIZE (1 << BLOCK_SHIFT)
+#define BLOCK_MASK (BLOCK_SIZE - 1)
+// TODO Increasing block sizes?
+// TODO allow freeing memory from pools
+typedef struct {
+	u32 struct_size;
+	u32 stride;
+	u32 block_cap;
+	u32 block_count;
+	u8 **blocks;
+	u32 used;
+	u32 first_free;
+} Pool;
+
+internal
+void pool_init(Pool *pool, u32 struct_size) {
+	*pool = (Pool){};
+	pool->struct_size = struct_size;
+	pool->stride = struct_size < sizeof(u32) ? sizeof(u32) : struct_size;
+	pool->block_cap = 8;
+	pool->blocks = malloc(pool->block_cap * sizeof(u8 *));
+	pool->used = BLOCK_SIZE;
+	pool->first_free = -1u;
+}
+
+// TODO remove if never called
+internal
+u8 *pool_get(Pool *pool, u32 index) {
+	u32 block_index = index >> BLOCK_SHIFT;
+	u32 index_in_block = index & BLOCK_MASK;
+	return pool->blocks[block_index] + index_in_block * pool->stride;
+}
+
+typedef struct {
+	u32 index;
+	u8 *ptr;
+} PoolAllocResult;
+
+internal
+PoolAllocResult pool_alloc(Pool *pool) {
+	u32 index;
+	u8 *ptr;
+	if (pool->first_free != -1u) {
+		index = pool->first_free;
+		ptr = pool_get(pool, index);
+		pool->first_free = *(u32 *)ptr;
+	} else {
+		if (pool->used == BLOCK_SIZE) {
+			pool->used = 0;
+			if (pool->block_count == pool->block_cap) {
+				pool->block_cap += pool->block_cap >> 1;
+				pool->blocks = realloc(pool->blocks, pool->block_cap * sizeof(u8 *));
+			}
+			pool->blocks[pool->block_count++] = malloc(BLOCK_SIZE);
+		}
+		index = (pool->block_count - 1) << BLOCK_SHIFT | pool->used++;
+		ptr = pool->blocks[pool->block_count - 1] + pool->used * pool->stride;
+	}
+	memset(ptr, 0, pool->struct_size);
+	return (PoolAllocResult){index, ptr};
+}
+
+internal
+void pool_free(Pool *pool, u32 index) {
+	u32 block_index = index >> BLOCK_SHIFT;
+	u32 index_in_block = index & BLOCK_MASK;
+	if (pool->block_count - 1 == block_index && pool->used - 1 == index_in_block) {
+		pool->used--;
+		return;
+	}
+	u8 *ptr = pool->blocks[block_index] + index_in_block * pool->stride;
+	*(u32 *)ptr = pool->first_free;
+	pool->first_free = index;
+}
+
+typedef struct {
+	u32 pool_index;
+	u32 index;
+} StablePtr;
+
+typedef struct {
+	StablePtr stable_ptr;
+	u8 *direct_ptr;
+} PtrPair;
+
+// The stack must be scanned and direct pointers updated when new fields are
+// added to a struct.
+typedef struct ObjectStack {
+	PtrPair *data;
+	u32 len;
+	u32 cap;
+} ObjectStack;
+
+internal
+void object_stack_push(ObjectStack *stack, PtrPair pair) {
+	if (stack->len >= stack->cap) {
+		stack->cap += stack->cap >> 1;
+		stack->data = realloc(stack->data, stack->cap * sizeof(String));
+	}
+	stack->data[stack->len++] = pair;
+}
+
+#define TYPE_STRING 0
 typedef struct Parser {
 	SourceFile *file;
 	ErrorCount *errors;
@@ -765,8 +869,23 @@ typedef struct Parser {
 	u64 *first_set_table;
 	u32 *parse_table_index;
 	u16 *parse_table;
+
+	u32 pool_cap;
+	u32 pool_count;
+	Pool *pools;
 } Parser;
 #define FIRST_SET_TABLE(parser) ((u64 (*)[(parser)->bitset_width])(parser)->first_set_table)
+
+internal
+PtrPair parser_alloc(Parser *parser, u32 type) {
+	PoolAllocResult result = pool_alloc(&parser->pools[type]);
+	return (PtrPair){{type, result.index}, result.ptr};
+}
+
+internal
+void parser_free(Parser *parser, StablePtr ptr) {
+	pool_free(&parser->pools[ptr.pool_index], ptr.index);
+}
 
 internal
 String token_to_string(u32 token, String extra_token_strings[]) {
@@ -1082,25 +1201,12 @@ typedef struct {
 	u32 offset_end;
 } Token;
 
-typedef struct ObjectStack {
-	String *data;
-	u32 len;
-	u32 cap;
-} ObjectStack;
-
-internal
-void object_stack_push(ObjectStack *stack, String str) {
-	if (stack->len >= stack->cap) {
-		stack->cap += stack->cap >> 1;
-		stack->data = realloc(stack->data, stack->cap * sizeof(String));
-	}
-	stack->data[stack->len++] = str;
-}
-
 internal
 void register_keyword(Parser *parser, ObjectStack *stack) {
 	printf("Parser %p, stack is %p\n", (void *)parser, (void *)stack);
-	String str = stack->data[--stack->len];
+	PtrPair pair = stack->data[--stack->len];
+	String str = *(String *)pair.direct_ptr;
+	parser_free(parser, pair.stable_ptr);
 	printf("Token literal text was %.*s\n", str.len, str.data);
 	// TODO interpret string, including handling missing quotes
 	// TODO ensure that it is a valid identifier
@@ -1111,6 +1217,7 @@ void register_keyword(Parser *parser, ObjectStack *stack) {
 		parser->extra_tokens = realloc(parser->extra_tokens, parser->extra_token_cap * sizeof(String));
 	}
 	u32 idx = parser->extra_token_count++;
+	// TODO this should be an array of extensible strings
 	parser->extra_token_strings[idx] = str;
 	parser->extra_tokens[idx] = (String){str.len - 2, str.data + 1};
 }
@@ -1240,7 +1347,10 @@ void parse(SourceFile file, ErrorCount *errors) {
 	ACTION(regrule_body, 2, register_rule_finish, 0);
 #undef ACTION
 #undef PUSH
+	Pool pools[1];
+	pool_init(&pools[TYPE_STRING], sizeof(String));
 	static_assert(array_count(extra_tokens) <= 8, "extra_tokens_cap too small");
+	static_assert(array_count(pools) <= 8, "pool_cap too small");
 	Parser parser = {
 		&file,
 		errors,
@@ -1256,6 +1366,9 @@ void parse(SourceFile file, ErrorCount *errors) {
 		NULL,
 		malloc(array_count(rulesets) * sizeof(u32)),
 		NULL,
+		8,
+		array_count(pools),
+		memcpy(malloc(8 * sizeof(Pool)), pools, sizeof(pools)),
 	};
 	u32 token_map[256] = {
 		['"'] = TOK_STRING,
@@ -1349,7 +1462,9 @@ void parse(SourceFile file, ErrorCount *errors) {
 				String tokstr = token_to_string(token, parser.extra_token_strings);
 				fprintf(stderr, "PARSE: matched token %.*s\n", tokstr.len, tokstr.data);
 				if (elem.should_push) {
-					object_stack_push(&obj_stack, (String){token_len, file.data + token_offset});
+					PtrPair str = parser_alloc(&parser, TYPE_STRING);
+					*(String *)str.direct_ptr = (String){token_len, file.data + token_offset};
+					object_stack_push(&obj_stack, str);
 				}
 				recovering = false;
 				want_token = true;
