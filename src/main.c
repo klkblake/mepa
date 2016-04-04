@@ -749,6 +749,12 @@ typedef struct {
 
 #define BITSET_WORD_SIZE (sizeof(u64) * 8)
 
+// TODO extensible objects
+//  - Field names are namespaced in structs
+//  - Names map to field indexes and offsets.
+//  - Structs track highest field that they have allocated memory for.
+//  - If allocated in pools, each pool could track the highest field
+
 #define BLOCK_SHIFT 9
 #define BLOCK_SIZE (1 << BLOCK_SHIFT)
 #define BLOCK_MASK (BLOCK_SIZE - 1)
@@ -775,7 +781,6 @@ void pool_init(Pool *pool, u32 struct_size) {
 	pool->first_free = -1u;
 }
 
-// TODO remove if never called
 internal
 u8 *pool_get(Pool *pool, u32 index) {
 	u32 block_index = index >> BLOCK_SHIFT;
@@ -852,7 +857,8 @@ void object_stack_push(ObjectStack *stack, PtrPair pair) {
 	stack->data[stack->len++] = pair;
 }
 
-#define TYPE_STRING 0
+#define TYPE_TOKEN  0
+#define TYPE_STRING 1
 typedef struct Parser {
 	SourceFile *file;
 	ErrorCount *errors;
@@ -1190,12 +1196,6 @@ void regen_parse_table(Parser *parser) {
 	free(first_set_table);
 }
 
-// TODO extensible objects
-//  - Field names are namespaced in structs
-//  - Names map to field indexes and offsets.
-//  - Structs track highest field that they have allocated memory for.
-//  - If allocated in pools, each pool could track the highest field
-
 typedef struct {
 	u32 offset_start;
 	u32 offset_end;
@@ -1205,8 +1205,9 @@ internal
 void register_keyword(Parser *parser, ObjectStack *stack) {
 	printf("Parser %p, stack is %p\n", (void *)parser, (void *)stack);
 	PtrPair pair = stack->data[--stack->len];
-	String str = *(String *)pair.direct_ptr;
+	Token tok = *(Token *)pair.direct_ptr;
 	parser_free(parser, pair.stable_ptr);
+	String str = {tok.offset_end - tok.offset_start + 1, parser->file->data + tok.offset_start};
 	printf("Token literal text was %.*s\n", str.len, str.data);
 	// TODO interpret string, including handling missing quotes
 	// TODO ensure that it is a valid identifier
@@ -1347,7 +1348,9 @@ void parse(SourceFile file, ErrorCount *errors) {
 	ACTION(regrule_body, 2, register_rule_finish, 0);
 #undef ACTION
 #undef PUSH
-	Pool pools[1];
+	Pool pools[2];
+	// TODO ensure no end padding
+	pool_init(&pools[TYPE_TOKEN], sizeof(Token));
 	pool_init(&pools[TYPE_STRING], sizeof(String));
 	static_assert(array_count(extra_tokens) <= 8, "extra_tokens_cap too small");
 	static_assert(array_count(pools) <= 8, "pool_cap too small");
@@ -1462,9 +1465,9 @@ void parse(SourceFile file, ErrorCount *errors) {
 				String tokstr = token_to_string(token, parser.extra_token_strings);
 				fprintf(stderr, "PARSE: matched token %.*s\n", tokstr.len, tokstr.data);
 				if (elem.should_push) {
-					PtrPair str = parser_alloc(&parser, TYPE_STRING);
-					*(String *)str.direct_ptr = (String){token_len, file.data + token_offset};
-					object_stack_push(&obj_stack, str);
+					PtrPair tok = parser_alloc(&parser, TYPE_TOKEN);
+					*(Token *)tok.direct_ptr = (Token){token_offset, token_end};
+					object_stack_push(&obj_stack, tok);
 				}
 				recovering = false;
 				want_token = true;
