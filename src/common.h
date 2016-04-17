@@ -36,6 +36,9 @@ static_assert(sizeof(f64) == 8, "f64 is the wrong size");
 
 #define array_count(array) (sizeof(array) / sizeof((array)[0]))
 
+#define min(a, b) ((a) <= (b) ? (a) : (b))
+#define max(a, b) ((a) >= (b) ? (a) : (b))
+
 #define CAT_(x, y) x##y
 #define CAT(x, y) CAT_(x, y)
 

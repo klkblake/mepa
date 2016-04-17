@@ -15,15 +15,37 @@ typedef struct {
 
 #define S(cstr) (String){sizeof(cstr) - 1, (u8 *)cstr}
 
+#define INITIAL_ARENA_SIZE 512
 typedef struct {
-	u32 line;
-	u32 column;
-} Location;
+	u8 *ptr;
+	u32 remaining;
+	u32 cap;
+} Arena;
 
-typedef struct Bracket {
-	u32 offset;
-	u8 c;
-} Bracket;
+internal
+void *arena_alloc(Arena *arena, u32 size) {
+	if (arena->remaining < size) {
+		if (arena->cap == 0) {
+			arena->cap = INITIAL_ARENA_SIZE;
+		} else {
+			do {
+				arena->cap += arena->cap >> 1;
+			} while (arena->cap < size);
+		}
+		arena->ptr = malloc(arena->cap);
+		arena->remaining = arena->cap;
+	}
+	u8 *ptr = arena->ptr;
+	arena->ptr += size;
+	arena->remaining -= size;
+	return ptr;
+}
+
+typedef union {
+	// TODO capture more detail from numbers
+	u64 as_number;
+	String as_string;
+} Value;
 
 typedef struct {
 	u32 offset;
@@ -31,17 +53,29 @@ typedef struct {
 	u32 align;
 } Line;
 
+typedef struct Bracket {
+	u32 offset;
+	u8 c;
+} Bracket;
+
 typedef struct {
 	char *name;
 	u8 *data;
 	u32 len;
 	u32 token_count;
 	u32 *token_offsets;
+	u32 value_count;
+	Value *values;
 	u32 line_count;
 	Line *lines;
 	u32 bracket_count;
 	Bracket *brackets;
 } SourceFile;
+
+typedef struct {
+	u32 line;
+	u32 column;
+} Location;
 
 typedef struct {
 	b32 use_color;
@@ -459,6 +493,34 @@ internal u8 open_bracket[]  = { '(', '[', '{' };
 internal u8 close_bracket[] = { ')', ']', '}' };
 
 internal
+b32 is_digit(s32 c) {
+	return '0' <= c && c <= '9';
+}
+
+internal
+s32 base_digit_to_value(s32 c, u32 base) {
+	assert(2 <= base && base <= 36);
+	s32 b = (s32)base;
+	if (b <= 10) {
+		if ('0' <= c && c < '0' + b) {
+			return c - '0';
+		}
+	} else {
+		if ('0' <= c && c <= '9') {
+			return c - '0';
+		}
+		b -= 10;
+		if ('a' <= c && c < 'a' + b) {
+			return c - 'a' + 10;
+		}
+		if ('A' <= c && c < 'A' + b) {
+			return c - 'A' + 10;
+		}
+	}
+	return -1;
+}
+
+internal
 void report_tokenise_error(ErrorCount *errors, SourceFile *file, u32 token_start, u32 token_end, char *message, ...) {
 	va_list args;
 	va_start(args, message);
@@ -482,6 +544,8 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 	u32 bracket_index = 0;
 	file.token_offsets = malloc((file.len + 1) * sizeof(u32));
 	file.token_offsets[0] = 0;
+	u32 value_cap = 8; // TODO actual guess based on number of tokens
+	file.values = malloc(value_cap * sizeof(Value));
 	UTF8Codepoint c = peek();
 	if (c.cp == '\t' || c.cp == ' ') {
 		file.token_offsets++;
@@ -542,6 +606,12 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 					accept();
 				}
 			}
+			// TODO pull this into a function?
+			if (file.value_count == value_cap) {
+				value_cap += value_cap >> 1;
+				file.values = realloc(file.values, value_cap * sizeof(Value));
+			}
+			file.values[file.value_count++].as_string = (String){ index - start - 2, file.data + start + 1};
 			NEXT_TOKEN;
 		}
 		if (c.cp == '/') {
@@ -589,7 +659,59 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 			c = next();
 			NEXT_TOKEN;
 		}
-		if ('0' <= c.cp && c.cp <= '9' || is_start_letter(c.cp)) {
+		if (is_digit(c.cp)) {
+			u64 value = (u64)c.cp - '0';
+			c = next();
+			u32 base;
+			b32 was_prefix = true;
+			if (value != 0) {
+				base = 10;
+				was_prefix = false;
+			} else {
+				if (c.cp == 'b') {
+					base = 2;
+				} else if (c.cp == 'o') {
+					base = 8;
+				} else if (c.cp == 'd') {
+					base = 10;
+				} else if (c.cp == 'x') {
+					base = 16;
+				} else {
+					base = 10;
+					was_prefix = false;
+				}
+			}
+			if (was_prefix) {
+				c = next();
+			}
+			b32 value_overflowed = false;
+			s32 digit_value;
+			while ((digit_value = base_digit_to_value(c.cp, base)) != -1) {
+				// TODO use type-generic builtin when we have newer clang
+				value |= __builtin_umull_overflow(value, base, &value);
+				value |= __builtin_uaddl_overflow(value, (u32)digit_value, &value);
+				c = next();
+			}
+			if (is_continue_letter(c.cp)) {
+				// TODO highlight whole literal (including following characters)
+				report_tokenise_error(errors, &file, index, index,
+				                      ERROR "illegal character in numeric literal");
+				do {
+					c = next();
+				} while (is_continue_letter(c.cp));
+			}
+			if (value_overflowed) {
+				report_tokenise_error(errors, &file, start, index,
+				                      ERROR "numeric literal does not fit in 64 bits");
+			}
+			if (file.value_count == value_cap) {
+				value_cap += value_cap >> 1;
+				file.values = realloc(file.values, value_cap * sizeof(Value));
+			}
+			file.values[file.value_count++].as_number = value;
+			NEXT_TOKEN;
+		}
+		if (is_start_letter(c.cp)) {
 			c = next();
 			while (is_continue_letter(c.cp)) {
 				c = next();
@@ -611,6 +733,7 @@ SourceFile tokenise(SourceFile file, ErrorCount *errors) {
 		c = next();
 	}
 	file.token_offsets = realloc(file.token_offsets, file.token_count * sizeof(u32));
+	file.values = realloc(file.values, file.value_count * sizeof(Value));
 	file.bracket_count = bracket_index;
 	file.brackets = realloc(file.brackets, file.bracket_count * sizeof(Bracket));
 	return file;
@@ -808,10 +931,11 @@ PoolAllocResult pool_alloc(Pool *pool) {
 				pool->block_cap += pool->block_cap >> 1;
 				pool->blocks = realloc(pool->blocks, pool->block_cap * sizeof(u8 *));
 			}
-			pool->blocks[pool->block_count++] = malloc(BLOCK_SIZE);
+			pool->blocks[pool->block_count++] = malloc(pool->stride*BLOCK_SIZE);
 		}
-		index = (pool->block_count - 1) << BLOCK_SHIFT | pool->used++;
+		index = (pool->block_count - 1) << BLOCK_SHIFT | pool->used;
 		ptr = pool->blocks[pool->block_count - 1] + pool->used * pool->stride;
+		pool->used++;
 	}
 	memset(ptr, 0, pool->struct_size);
 	return (PoolAllocResult){index, ptr};
@@ -842,6 +966,9 @@ typedef struct {
 
 // The stack must be scanned and direct pointers updated when new fields are
 // added to a struct.
+
+// TODO remove direct pointers -- the gain is minimal
+// TODO object placed by-value onto the stack?
 typedef struct ObjectStack {
 	PtrPair *data;
 	u32 len;
@@ -1199,6 +1326,7 @@ void regen_parse_table(Parser *parser) {
 typedef struct {
 	u32 offset_start;
 	u32 offset_end;
+	Value value;
 } Token;
 
 internal
@@ -1209,8 +1337,8 @@ void register_keyword(Parser *parser, ObjectStack *stack) {
 	parser_free(parser, pair.stable_ptr);
 	String str = {tok.offset_end - tok.offset_start + 1, parser->file->data + tok.offset_start};
 	printf("Token literal text was %.*s\n", str.len, str.data);
-	// TODO interpret string, including handling missing quotes
-	// TODO ensure that it is a valid identifier
+	printf("Token value was %.*s\n", tok.value.as_string.len, tok.value.as_string.data);
+	// TODO ensure that the string is a valid identifier or operator
 	if (parser->extra_token_count >= parser->extra_token_cap) {
 		parser->extra_token_cap += parser->extra_token_cap >> 1;
 		parser->extra_token_strings = realloc(parser->extra_token_strings,
@@ -1219,8 +1347,9 @@ void register_keyword(Parser *parser, ObjectStack *stack) {
 	}
 	u32 idx = parser->extra_token_count++;
 	// TODO this should be an array of extensible strings
+	// TODO this should be a canoncial version of the string, not whatever was used
 	parser->extra_token_strings[idx] = str;
-	parser->extra_tokens[idx] = (String){str.len - 2, str.data + 1};
+	parser->extra_tokens[idx] = tok.value.as_string;
 }
 
 internal
@@ -1404,6 +1533,7 @@ void parse(SourceFile file, ErrorCount *errors) {
 	b32 recovering = false;
 	b32 found_error = false;
 	u32 token_index = 0;
+	u32 value_index = 0;
 	// These are only initialised here because the compiler can't tell that
 	// they will be initialised before use
 	u32 token_offset = 0, token_end = 0;
@@ -1466,7 +1596,11 @@ void parse(SourceFile file, ErrorCount *errors) {
 				fprintf(stderr, "PARSE: matched token %.*s\n", tokstr.len, tokstr.data);
 				if (elem.should_push) {
 					PtrPair tok = parser_alloc(&parser, TYPE_TOKEN);
-					*(Token *)tok.direct_ptr = (Token){token_offset, token_end};
+					Value value = {};
+					if (token == TOK_STRING || token == TOK_NUMBER) {
+						value = file.values[value_index++];
+					}
+					*(Token *)tok.direct_ptr = (Token){token_offset, token_end, value};
 					object_stack_push(&obj_stack, tok);
 				}
 				recovering = false;
