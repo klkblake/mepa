@@ -959,29 +959,23 @@ typedef struct {
 	u32 index;
 } StablePtr;
 
-typedef struct {
-	StablePtr stable_ptr;
-	u8 *direct_ptr;
-} PtrPair;
-
 // The stack must be scanned and direct pointers updated when new fields are
 // added to a struct.
 
-// TODO remove direct pointers -- the gain is minimal
 // TODO object placed by-value onto the stack?
 typedef struct ObjectStack {
-	PtrPair *data;
+	StablePtr *data;
 	u32 len;
 	u32 cap;
 } ObjectStack;
 
 internal
-void object_stack_push(ObjectStack *stack, PtrPair pair) {
+void object_stack_push(ObjectStack *stack, StablePtr ptr) {
 	if (stack->len >= stack->cap) {
 		stack->cap += stack->cap >> 1;
-		stack->data = realloc(stack->data, stack->cap * sizeof(String));
+		stack->data = realloc(stack->data, stack->cap * sizeof(StablePtr));
 	}
-	stack->data[stack->len++] = pair;
+	stack->data[stack->len++] = ptr;
 }
 
 #define TYPE_TOKEN  0
@@ -1009,10 +1003,20 @@ typedef struct Parser {
 } Parser;
 #define FIRST_SET_TABLE(parser) ((u64 (*)[(parser)->bitset_width])(parser)->first_set_table)
 
+typedef struct {
+	StablePtr stable_ptr;
+	u8 *direct_ptr;
+} ParserAllocResult;
+
 internal
-PtrPair parser_alloc(Parser *parser, u32 type) {
+ParserAllocResult parser_alloc(Parser *parser, u32 type) {
 	PoolAllocResult result = pool_alloc(&parser->pools[type]);
-	return (PtrPair){{type, result.index}, result.ptr};
+	return (ParserAllocResult){{type, result.index}, result.ptr};
+}
+
+internal
+u8 *parser_get(Parser *parser, StablePtr ptr) {
+	return pool_get(&parser->pools[ptr.pool_index], ptr.index);
 }
 
 internal
@@ -1332,9 +1336,9 @@ typedef struct {
 internal
 void register_keyword(Parser *parser, ObjectStack *stack) {
 	printf("Parser %p, stack is %p\n", (void *)parser, (void *)stack);
-	PtrPair pair = stack->data[--stack->len];
-	Token tok = *(Token *)pair.direct_ptr;
-	parser_free(parser, pair.stable_ptr);
+	StablePtr ptr = stack->data[--stack->len];
+	Token tok = *(Token *)parser_get(parser, ptr);
+	parser_free(parser, ptr);
 	String str = {tok.offset_end - tok.offset_start + 1, parser->file->data + tok.offset_start};
 	printf("Token literal text was %.*s\n", str.len, str.data);
 	printf("Token value was %.*s\n", tok.value.as_string.len, tok.value.as_string.data);
@@ -1595,13 +1599,13 @@ void parse(SourceFile file, ErrorCount *errors) {
 				String tokstr = token_to_string(token, parser.extra_token_strings);
 				fprintf(stderr, "PARSE: matched token %.*s\n", tokstr.len, tokstr.data);
 				if (elem.should_push) {
-					PtrPair tok = parser_alloc(&parser, TYPE_TOKEN);
+					ParserAllocResult tok = parser_alloc(&parser, TYPE_TOKEN);
 					Value value = {};
 					if (token == TOK_STRING || token == TOK_NUMBER) {
 						value = file.values[value_index++];
 					}
 					*(Token *)tok.direct_ptr = (Token){token_offset, token_end, value};
-					object_stack_push(&obj_stack, tok);
+					object_stack_push(&obj_stack, tok.stable_ptr);
 				}
 				recovering = false;
 				want_token = true;
