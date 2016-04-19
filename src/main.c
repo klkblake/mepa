@@ -1359,11 +1359,21 @@ void register_keyword(Parser *parser, ObjectStack *stack) {
 internal
 void register_rule_init(Parser *parser, ObjectStack *stack) {
 	printf("Initialise rule\n");
+	for (u32 i = 0; i < stack->len; i++) {
+		Token tok = *(Token *)parser_get(parser, stack->data[i]);
+		printf("stack %u: %.*s\n", i, tok.offset_end - tok.offset_start + 1,
+		       parser->file->data + tok.offset_start);
+	}
 }
 
 internal
 void register_rule_finish(Parser *parser, ObjectStack *stack) {
 	printf("Finish rule\n");
+	for (u32 i = 0; i < stack->len; i++) {
+		Token tok = *(Token *)parser_get(parser, stack->data[i]);
+		printf("stack %u: %.*s\n", i, tok.offset_end - tok.offset_start + 1,
+		       parser->file->data + tok.offset_start);
+	}
 }
 
 #define SE_TERMINAL    0
@@ -1471,7 +1481,6 @@ void parse(SourceFile file, ErrorCount *errors) {
 #define ACTION(name, idx, func, mask) rulesets[rs_idx_ ## name].rules[idx].middle_action = func; PUSH(name, idx, mask)
 	ACTION(regkw_keyword, 0, register_keyword, 1);
 	PUSH(regkw_keyword, 0, 1);
-	PUSH(regrule, 0, 1);
 	PUSH(regrule_name, 0, 1);
 	PUSH(regrule_arch, 0, 1);
 	PUSH(regrule_first, 1, 1);
